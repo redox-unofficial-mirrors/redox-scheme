@@ -138,6 +138,9 @@ impl Socket {
     pub fn write_responses(&self, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
         write_responses(self.0.raw(), buf, behavior)
     }
+    pub fn inner(&self) -> &libredox::Fd {
+        &self.0
+    }
 }
 
 #[repr(transparent)]
