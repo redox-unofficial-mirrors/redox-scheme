@@ -81,6 +81,9 @@ use core::mem::size_of;
 pub struct Request(Packet);
 
 impl Request {
+    pub fn context_id(&self) -> usize {
+        self.0.pid
+    }
     pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Response {
         unsafe {
             scheme.handle(&mut self.0);
