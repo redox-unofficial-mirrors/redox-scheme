@@ -119,10 +119,21 @@ impl Request {
 pub struct Socket(libredox::Fd);
 
 impl Socket {
-    pub fn create(name: impl AsRef<str>) -> Result<Self> {
-        let name = name.as_ref();
-        let fd = libredox::Fd::open(&format!(":{name}"), flag::O_CLOEXEC | flag::O_CREAT, 0)?;
+    fn create_inner(name: &str, nonblock: bool) -> Result<Self> {
+        let mut flags = 0;
+
+        if nonblock {
+            flags |= flag::O_NONBLOCK;
+        }
+
+        let fd = libredox::Fd::open(&format!(":{name}"), flag::O_CLOEXEC | flag::O_CREAT | flags, 0)?;
         Ok(Self(fd))
+    }
+    pub fn create(name: impl AsRef<str>) -> Result<Self> {
+        Self::create_inner(name.as_ref(), false)
+    }
+    pub fn nonblock(name: impl AsRef<str>) -> Result<Self> {
+        Self::create_inner(name.as_ref(), true)
     }
     pub fn read_requests(&self, buf: &mut [Request], behavior: SignalBehavior) -> Result<usize> {
         read_requests(self.0.raw(), buf, behavior)
