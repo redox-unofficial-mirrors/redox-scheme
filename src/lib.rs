@@ -149,6 +149,19 @@ impl Socket {
     pub fn write_responses(&self, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
         write_responses(self.0.raw(), buf, behavior)
     }
+    pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
+        Ok(self.write_responses(&[resp], behavior)? > 0)
+    }
+    pub fn post_fevent(&self, id: usize, flags: usize) -> Result<()> {
+        self.0.write(&syscall::Packet {
+            a: syscall::SYS_FEVENT,
+            b: id,
+            c: flags,
+            d: 0,
+            ..Default::default()
+        })?;
+        Ok(())
+    }
     pub fn inner(&self) -> &libredox::Fd {
         &self.0
     }
