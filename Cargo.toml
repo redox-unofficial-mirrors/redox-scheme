@@ -4,6 +4,9 @@ authors = ["4lDO2 <4lDO2@protonmail.com>"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+exclude = ["target"]
+repository = "https://gitlab.redox-os.org/redox-os/redox-scheme"
+description = "Library for writing Redox scheme daemons"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
