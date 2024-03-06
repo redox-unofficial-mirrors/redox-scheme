@@ -1,7 +1,10 @@
 use core::{slice, str};
 
 use libredox::flag;
-use syscall::{Error, Packet, Result, EOPNOTSUPP, ESKMSG, SKMSG_FRETURNFD};
+use syscall::{
+    Error, Packet, Result, EINTR, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC,
+    KSMSG_MUNMAP, SKMSG_FRETURNFD,
+};
 
 pub use self::scheme::Scheme;
 pub use self::scheme_block::SchemeBlock;
@@ -80,37 +83,77 @@ use core::mem::size_of;
 #[derive(Clone, Copy, Default)]
 pub struct Request(Packet);
 
+#[derive(Clone, Copy, Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
+pub struct Id(u64);
+
+#[derive(Debug)]
+pub struct CancelationRequest {
+    pub id: Id,
+}
+
 impl Request {
     pub fn context_id(&self) -> usize {
         self.0.pid
     }
-    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Response {
-        unsafe {
-            scheme.handle(&mut self.0);
-        }
-        Response(self.0)
+    pub fn request_id(&self) -> Id {
+        Id(self.0.id)
     }
-    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Response {
+    pub fn is_ksmsg(&self) -> bool {
+        // TODO: Should KSMSG_MMAP_PREP be a regular scheme call?
+        matches!(
+            self.0.a,
+            self::KSMSG_CANCEL | self::KSMSG_MSYNC | self::KSMSG_MUNMAP | self::KSMSG_MMAP
+        )
+    }
+    // TODO: Better API
+    pub fn as_maybe_cancelation_req_opt(&self) -> Option<CancelationRequest> {
+        if self.0.a == KSMSG_CANCEL {
+            Some(CancelationRequest {
+                id: Id((self.0.b as u64) | (self.0.c as u64) << 32),
+            })
+        } else {
+            None
+        }
+    }
+    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Option<Response> {
+        if self.is_ksmsg() {
+            return None;
+        }
         unsafe {
             scheme.handle(&mut self.0);
         }
-        Response(self.0)
+        Some(Response(self.0))
+    }
+    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Option<Response> {
+        if self.is_ksmsg() {
+            return None;
+        }
+        unsafe {
+            scheme.handle(&mut self.0);
+        }
+        Some(Response(self.0))
     }
     pub fn handle_scheme_block(
         mut self,
         scheme: &mut impl SchemeBlock,
-    ) -> Result<Response, Request> {
+    ) -> Result<Option<Response>, Request> {
+        if self.is_ksmsg() {
+            return Ok(None);
+        }
         match unsafe { scheme.handle(&mut self.0) } {
-            Some(code) => Ok(Response(Packet { a: code, ..self.0 })),
+            Some(code) => Ok(Some(Response(Packet { a: code, ..self.0 }))),
             None => Err(self),
         }
     }
     pub fn handle_scheme_block_mut(
         mut self,
         scheme: &mut impl SchemeBlockMut,
-    ) -> Result<Response, Request> {
+    ) -> Result<Option<Response>, Request> {
+        if self.is_ksmsg() {
+            return Ok(None);
+        }
         match unsafe { scheme.handle(&mut self.0) } {
-            Some(code) => Ok(Response(Packet { a: code, ..self.0 })),
+            Some(code) => Ok(Some(Response(Packet { a: code, ..self.0 }))),
             None => Err(self),
         }
     }
@@ -126,7 +169,11 @@ impl Socket {
             flags |= flag::O_NONBLOCK;
         }
 
-        let fd = libredox::Fd::open(&format!(":{name}"), flag::O_CLOEXEC | flag::O_CREAT | flags, 0)?;
+        let fd = libredox::Fd::open(
+            &format!(":{name}"),
+            flag::O_CLOEXEC | flag::O_CREAT | flags,
+            0,
+        )?;
         Ok(Self(fd))
     }
     pub fn create(name: impl AsRef<str>) -> Result<Self> {
@@ -199,13 +246,11 @@ pub fn read_requests(
             core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len)
         }) {
             Ok(n) => break n,
-            error @ Err(Error {
-                errno: libredox::errno::EINTR,
-            }) => match behavior {
+            Err(error) if error.errno() == EINTR => match behavior {
                 SignalBehavior::Restart => continue,
-                SignalBehavior::Interrupt => return error,
+                SignalBehavior::Interrupt => return Err(error.into()),
             },
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     };
 
@@ -226,13 +271,11 @@ pub fn write_responses(socket: usize, buf: &[Response], behavior: SignalBehavior
     let bytes_written = loop {
         match libredox::call::write(socket, bytes) {
             Ok(n) => break n,
-            error @ Err(Error {
-                errno: libredox::errno::EINTR,
-            }) => match behavior {
+            Err(error) if error.errno() == EINTR => match behavior {
                 SignalBehavior::Restart => continue,
-                SignalBehavior::Interrupt => return error,
+                SignalBehavior::Interrupt => return Err(error.into()),
             },
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     };
     debug_assert_eq!(bytes_written % size_of::<Response>(), 0);

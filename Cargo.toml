@@ -12,4 +12,4 @@ description = "Library for writing Redox scheme daemons"
 
 [dependencies]
 redox_syscall = "0.4.1"
-libredox = "0.0.3"
+libredox = "0.1.1"
