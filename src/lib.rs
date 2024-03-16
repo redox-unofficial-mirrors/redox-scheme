@@ -80,81 +80,95 @@ impl CallerCtx {
 use core::mem::size_of;
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Default)]
-pub struct Request(Packet);
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Request {
+    packet: Packet,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
 pub struct Id(u64);
 
 #[derive(Debug)]
-pub struct CancelationRequest {
+pub struct CancellationRequest {
     pub id: Id,
 }
 
-impl Request {
-    pub fn context_id(&self) -> usize {
-        self.0.pid
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct CallRequest {
+    inner: Request,
+}
+
+pub enum RequestKind {
+    Call(CallRequest),
+    Cancellation(CancellationRequest),
+    MsyncMsg,
+    MunmapMsg,
+    MmapMsg,
+}
+
+impl CallRequest {
+    #[inline]
+    pub fn request(&self) -> Request {
+        self.inner
     }
-    pub fn request_id(&self) -> Id {
-        Id(self.0.id)
-    }
-    pub fn is_ksmsg(&self) -> bool {
-        // TODO: Should KSMSG_MMAP_PREP be a regular scheme call?
-        matches!(
-            self.0.a,
-            self::KSMSG_CANCEL | self::KSMSG_MSYNC | self::KSMSG_MUNMAP | self::KSMSG_MMAP
-        )
-    }
-    // TODO: Better API
-    pub fn as_maybe_cancelation_req_opt(&self) -> Option<CancelationRequest> {
-        if self.0.a == KSMSG_CANCEL {
-            Some(CancelationRequest {
-                id: Id((self.0.b as u64) | (self.0.c as u64) << 32),
-            })
-        } else {
-            None
-        }
-    }
-    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Option<Response> {
-        if self.is_ksmsg() {
-            return None;
-        }
+
+    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Response {
         unsafe {
-            scheme.handle(&mut self.0);
+            scheme.handle(&mut self.inner.packet);
         }
-        Some(Response(self.0))
+        Response(self.inner.packet)
     }
-    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Option<Response> {
-        if self.is_ksmsg() {
-            return None;
-        }
+    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Response {
         unsafe {
-            scheme.handle(&mut self.0);
+            scheme.handle(&mut self.inner.packet);
         }
-        Some(Response(self.0))
+        Response(self.inner.packet)
     }
-    pub fn handle_scheme_block(
-        mut self,
-        scheme: &mut impl SchemeBlock,
-    ) -> Result<Option<Response>, Request> {
-        if self.is_ksmsg() {
-            return Ok(None);
-        }
-        match unsafe { scheme.handle(&mut self.0) } {
-            Some(code) => Ok(Some(Response(Packet { a: code, ..self.0 }))),
+    pub fn handle_scheme_block(mut self, scheme: &mut impl SchemeBlock) -> Result<Response, Self> {
+        match unsafe { scheme.handle(&self.inner.packet) } {
+            Some(code) => Ok(Response(Packet {
+                a: code,
+                ..self.inner.packet
+            })),
             None => Err(self),
         }
     }
     pub fn handle_scheme_block_mut(
         mut self,
         scheme: &mut impl SchemeBlockMut,
-    ) -> Result<Option<Response>, Request> {
-        if self.is_ksmsg() {
-            return Ok(None);
-        }
-        match unsafe { scheme.handle(&mut self.0) } {
-            Some(code) => Ok(Some(Response(Packet { a: code, ..self.0 }))),
+    ) -> Result<Response, Self> {
+        match unsafe { scheme.handle(&self.inner.packet) } {
+            Some(code) => Ok(Response(Packet {
+                a: code,
+                ..self.inner.packet
+            })),
             None => Err(self),
+        }
+    }
+}
+
+impl Request {
+    #[inline]
+    pub fn context_id(&self) -> usize {
+        self.packet.pid
+    }
+    #[inline]
+    pub fn request_id(&self) -> Id {
+        Id(self.packet.id)
+    }
+    pub fn kind(self) -> RequestKind {
+        // TODO: Should KSMSG_MMAP_PREP be a regular scheme call?
+
+        match self.packet.a {
+            KSMSG_CANCEL => RequestKind::Cancellation(CancellationRequest {
+                id: Id((self.packet.b as u64) | ((self.packet.c as u64) << 32)),
+            }),
+            KSMSG_MSYNC => RequestKind::MsyncMsg,
+            KSMSG_MUNMAP => RequestKind::MunmapMsg,
+            KSMSG_MMAP => RequestKind::MmapMsg,
+
+            _ => RequestKind::Call(CallRequest { inner: self }),
         }
     }
 }
@@ -219,10 +233,10 @@ impl Socket {
 pub struct Response(Packet);
 
 impl Response {
-    pub fn new(req: &Request, status: Result<usize>) -> Self {
+    pub fn new(req: &CallRequest, status: Result<usize>) -> Self {
         Self(Packet {
             a: Error::mux(status),
-            ..req.0
+            ..req.inner.packet
         })
     }
 }
