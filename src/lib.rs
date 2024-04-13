@@ -1,27 +1,18 @@
+#![feature(async_fn_in_trait)]
+
 use core::{slice, str};
 
 use libredox::flag;
 use syscall::{
-    Error, Packet, Result, EINTR, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC,
-    KSMSG_MUNMAP, SKMSG_FRETURNFD,
+    Error, Packet, Result, EINTR, ENOSYS, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP, SKMSG_FRETURNFD
 };
-
-pub use self::scheme::Scheme;
-pub use self::scheme_block::SchemeBlock;
-pub use self::scheme_block_mut::SchemeBlockMut;
-pub use self::scheme_mut::SchemeMut;
-pub use self::seek::*;
 
 unsafe fn str_from_raw_parts(ptr: *const u8, len: usize) -> Option<&'static str> {
     let slice = slice::from_raw_parts(ptr, len);
     str::from_utf8(slice).ok()
 }
 
-mod scheme;
-mod scheme_block;
-mod scheme_block_mut;
-mod scheme_mut;
-mod seek;
+pub mod scheme;
 
 pub struct CallerCtx {
     pub pid: usize,
@@ -32,39 +23,6 @@ pub struct CallerCtx {
 pub enum OpenResult {
     ThisScheme { number: usize },
     OtherScheme { fd: usize },
-}
-
-// TODO: Find a better solution than generate.sh
-pub(crate) fn convert_to_this_scheme(r: Result<usize>) -> Result<OpenResult> {
-    r.map(|number| OpenResult::ThisScheme { number })
-}
-pub(crate) fn convert_to_this_scheme_block(r: Result<Option<usize>>) -> Result<Option<OpenResult>> {
-    r.map(|o| o.map(|number| OpenResult::ThisScheme { number }))
-}
-pub(crate) fn convert_in_scheme_handle_block(
-    _: &Packet,
-    result: Result<Option<OpenResult>>,
-) -> Result<Option<usize>> {
-    match result {
-        Ok(Some(OpenResult::ThisScheme { number })) => Ok(Some(number)),
-        Ok(Some(OpenResult::OtherScheme { .. })) => Err(Error::new(EOPNOTSUPP)),
-        Ok(None) => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-pub(crate) fn convert_in_scheme_handle(
-    packet: &mut Packet,
-    result: Result<OpenResult>,
-) -> Result<usize> {
-    match result {
-        Ok(OpenResult::ThisScheme { number }) => Ok(number),
-        Ok(OpenResult::OtherScheme { fd }) => {
-            packet.b = SKMSG_FRETURNFD;
-            packet.c = fd;
-            Err(Error::new(ESKMSG))
-        }
-        Err(err) => Err(err),
-    }
 }
 
 impl CallerCtx {
@@ -78,6 +36,8 @@ impl CallerCtx {
 }
 
 use core::mem::size_of;
+
+use self::scheme::{Op, Scheme};
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -113,37 +73,25 @@ impl CallRequest {
         self.inner
     }
 
-    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Response {
-        unsafe {
-            scheme.handle(&mut self.inner.packet);
-        }
-        Response(self.inner.packet)
-    }
-    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Response {
-        unsafe {
-            scheme.handle(&mut self.inner.packet);
-        }
-        Response(self.inner.packet)
-    }
-    pub fn handle_scheme_block(mut self, scheme: &mut impl SchemeBlock) -> Result<Response, Self> {
-        match unsafe { scheme.handle(&self.inner.packet) } {
-            Some(code) => Ok(Response(Packet {
-                a: code,
-                ..self.inner.packet
-            })),
-            None => Err(self),
-        }
-    }
-    pub fn handle_scheme_block_mut(
-        mut self,
-        scheme: &mut impl SchemeBlockMut,
-    ) -> Result<Response, Self> {
-        match unsafe { scheme.handle(&self.inner.packet) } {
-            Some(code) => Ok(Response(Packet {
-                a: code,
-                ..self.inner.packet
-            })),
-            None => Err(self),
+    // TODO: make this fn safe: own ref to scheme socket fd, and ensure it's not possible to reply
+    // so long as this future still exists.
+    pub async unsafe fn handle(&self, scheme: &mut impl Scheme) -> Response {
+        let Some(op) = Op::from_packet_unchecked(self.inner.packet) else {
+            return Response::new(&self, Err(Error::new(ENOSYS)));
+        };
+        match op.handle(scheme).await {
+            scheme::Response::Regular(reg) => Response(Packet {
+                id: self.inner.packet.id,
+                a: reg,
+                ..Default::default()
+            }),
+            scheme::Response::ForwardFd(fd) => Response(Packet {
+                id: 0,
+                a: Error::mux(Err(Error::new(ESKMSG))),
+                b: SKMSG_FRETURNFD,
+                c: fd,
+                ..Default::default()
+            }),
         }
     }
 }
