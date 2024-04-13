@@ -4,30 +4,16 @@ extern crate alloc;
 use alloc::format;
 
 use core::marker::PhantomData;
-use core::{slice, str};
+
+use core::str;
 
 use libredox::flag;
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 use syscall::{
-    Error, EventFlags, MapFlags, MunmapFlags, Packet, Result, Stat, StatVfs, TimeSpec, EBADF, EINTR, ENOENT, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP, O_FSYNC, SKMSG_FRETURNFD
+    Error, Packet, Result, EINTR, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, O_FSYNC,
 };
 
-pub use self::scheme::Scheme;
-pub use self::scheme_block::SchemeBlock;
-pub use self::scheme_block_mut::SchemeBlockMut;
-pub use self::scheme_mut::SchemeMut;
-pub use self::seek::*;
-
-unsafe fn str_from_raw_parts(ptr: *const u8, len: usize) -> Option<&'static str> {
-    let slice = slice::from_raw_parts(ptr, len);
-    str::from_utf8(slice).ok()
-}
-
-mod scheme;
-mod scheme_block;
-mod scheme_block_mut;
-mod scheme_mut;
-mod seek;
+pub mod scheme;
 
 pub struct CallerCtx {
     pub pid: usize,
@@ -38,39 +24,6 @@ pub struct CallerCtx {
 pub enum OpenResult {
     ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
-}
-
-// TODO: Find a better solution than generate.sh
-pub(crate) fn convert_to_this_scheme(r: Result<usize>) -> Result<OpenResult> {
-    r.map(|number| OpenResult::ThisScheme { number, flags: NewFdFlags::empty() })
-}
-pub(crate) fn convert_to_this_scheme_block(r: Result<Option<usize>>) -> Result<Option<OpenResult>> {
-    r.map(|o| o.map(|number| OpenResult::ThisScheme { number, flags: NewFdFlags::empty() }))
-}
-pub(crate) fn convert_in_scheme_handle_block(
-    _: &Packet,
-    result: Result<Option<OpenResult>>,
-) -> Result<Option<usize>> {
-    match result {
-        Ok(Some(OpenResult::ThisScheme { number, .. })) => Ok(Some(number)),
-        Ok(Some(OpenResult::OtherScheme { .. })) => Err(Error::new(EOPNOTSUPP)),
-        Ok(None) => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-pub(crate) fn convert_in_scheme_handle(
-    packet: &mut Packet,
-    result: Result<OpenResult>,
-) -> Result<usize> {
-    match result {
-        Ok(OpenResult::ThisScheme { number, .. }) => Ok(number),
-        Ok(OpenResult::OtherScheme { fd }) => {
-            packet.b = SKMSG_FRETURNFD;
-            packet.c = fd;
-            Err(Error::new(ESKMSG))
-        }
-        Err(err) => Err(err),
-    }
 }
 
 impl CallerCtx {
@@ -235,217 +188,6 @@ impl CallRequest {
     #[inline]
     pub fn request(&self) -> Request {
         self.inner
-    }
-
-}
-impl CallRequest<Legacy> {
-    pub fn handle_scheme(mut self, scheme: &impl Scheme) -> Response<Legacy> {
-        unsafe {
-            scheme.handle(&mut self.inner.sqe);
-        }
-        Response::<Legacy>(self.inner.sqe)
-    }
-    pub fn handle_scheme_mut(mut self, scheme: &mut impl SchemeMut) -> Response<Legacy> {
-        unsafe {
-            scheme.handle(&mut self.inner.sqe);
-        }
-        Response::<Legacy>(self.inner.sqe)
-    }
-    pub fn handle_scheme_block(self, scheme: &mut impl SchemeBlock) -> Result<Response<Legacy>, Self> {
-        match unsafe { scheme.handle(&self.inner.sqe) } {
-            Some(code) => Ok(Response::<Legacy>(Packet {
-                a: code,
-                ..self.inner.sqe
-            })),
-            None => Err(self),
-        }
-    }
-    pub fn handle_scheme_block_mut(
-        self,
-        scheme: &mut impl SchemeBlockMut,
-    ) -> Result<Response<Legacy>, Self> {
-        match unsafe { scheme.handle(&self.inner.sqe) } {
-            Some(code) => Ok(Response::<Legacy>(Packet {
-                a: code,
-                ..self.inner.sqe
-            })),
-            None => Err(self),
-        }
-    }
-}
-impl CallRequest<V2> {
-    pub fn handle_scheme_mut(self, scheme: &mut impl SchemeMut) -> Response<V2> {
-        let Some(opcode) = Opcode::try_from_raw(self.inner.sqe.opcode) else {
-            return Response::new(&self, Err(Error::new(EOPNOTSUPP)));
-        };
-        let args = self.inner.sqe.args;
-
-        let hack_uid = args[5] as u32;
-        let hack_gid = (args[5] >> 32) as u32;
-        let ctx = CallerCtx {
-            pid: self.inner.sqe.caller as usize,
-            uid: hack_uid,
-            gid: hack_gid,
-        };
-
-        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
-        let result = unsafe {
-            use core::{str, slice};
-            match opcode {
-                Opcode::Open => match scheme.xopen(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), c, &ctx) {
-                    Ok(OpenResult::ThisScheme { number, flags }) => return Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [flags.bits(), 0, 0],
-                        flags: CqeOpcode::RespondRegular as u8,
-                        result: number as u64,
-                    }),
-                    Err(err) => Err(err),
-                    Ok(OpenResult::OtherScheme { fd }) => return Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [0_u8; 3],
-                        flags: CqeOpcode::RespondWithFd as u8,
-                        result: fd as u64,
-                    }),
-                },
-                Opcode::Rmdir => scheme.rmdir(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid),
-                Opcode::Unlink => scheme.unlink(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid),
-                Opcode::Dup => match scheme.xdup(a, slice::from_raw_parts(b as *const u8, c), &ctx) {
-                    Ok(OpenResult::ThisScheme { number, flags }) => return Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [flags.bits(), 0, 0],
-                        flags: CqeOpcode::RespondRegular as u8,
-                        result: number as u64,
-                    }),
-                    Err(err) => Err(err),
-                    Ok(OpenResult::OtherScheme { fd }) => return Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [0_u8; 3],
-                        flags: CqeOpcode::RespondWithFd as u8,
-                        result: fd as u64,
-                    }),
-                }
-                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c), args[3], args[4] as u32),
-                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c), args[3], args[4] as u32),
-
-                // TODO: 64-bit offset on 32-bit platforms
-                Opcode::Fsize => scheme.fsize(a).map(|o| o as usize),
-                Opcode::Fchmod => scheme.fchmod(a, b as u16),
-                Opcode::Fchown => scheme.fchown(a, b as u32, c as u32),
-                Opcode::Fcntl => scheme.fcntl(a, b, c),
-                Opcode::Fevent => scheme.fevent(a, EventFlags::from_bits_retain(b)).map(|fl| fl.bits()),
-                Opcode::Fpath => scheme.fpath(a, slice::from_raw_parts_mut(b as *mut u8, c)),
-                Opcode::Frename => scheme.frename(a, str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)), hack_uid, hack_gid),
-                Opcode::Fstat => {
-                    assert!(c >= size_of::<Stat>());
-                    scheme.fstat(a, &mut *(b as *mut Stat))
-                }
-                Opcode::Fstatvfs => {
-                    assert!(c >= size_of::<StatVfs>());
-                    scheme.fstatvfs(a, &mut *(b as *mut StatVfs))
-                }
-                Opcode::Fsync => scheme.fsync(a),
-                Opcode::Ftruncate => scheme.ftruncate(a, b),
-                Opcode::Futimens => {
-                    assert!(c <= 2 * core::mem::size_of::<TimeSpec>());
-                    scheme.futimens(a, slice::from_raw_parts(b as *const TimeSpec, c / core::mem::size_of::<TimeSpec>()))
-                }
-
-                Opcode::Close => scheme.close(a),
-
-                Opcode::MmapPrep => scheme.mmap_prep(a, args[3], b, MapFlags::from_bits_retain(c)),
-                Opcode::Munmap => scheme.munmap(a, args[3], b, MunmapFlags::from_bits_retain(c)),
-
-                _ => return Response::new(&self, Err(Error::new(EOPNOTSUPP))),
-            }
-        };
-        Response::<V2>::new(&self, result)
-    }
-    // TODO: Copy paste is bad, but ./generate.sh is worse
-    pub fn handle_scheme_block_mut(self, scheme: &mut impl SchemeBlockMut) -> Option<Response<V2>> {
-        let Some(opcode) = Opcode::try_from_raw(self.inner.sqe.opcode) else {
-            return Some(Response::new(&self, Err(Error::new(EOPNOTSUPP))));
-        };
-        let args = self.inner.sqe.args;
-
-        let hack_uid = args[5] as u32;
-        let hack_gid = (args[5] >> 32) as u32;
-        let ctx = CallerCtx {
-            pid: self.inner.sqe.caller as usize,
-            uid: hack_uid,
-            gid: hack_gid,
-        };
-
-        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
-        let result = unsafe {
-            use core::{str, slice};
-            match opcode {
-                Opcode::Open => match scheme.xopen(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), c, &ctx).transpose()? {
-                    Ok(OpenResult::ThisScheme { number, flags }) => return Some(Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [flags.bits(), 0, 0],
-                        flags: CqeOpcode::RespondRegular as u8,
-                        result: number as u64,
-                    })),
-                    Err(err) => Err(err),
-                    Ok(OpenResult::OtherScheme { fd }) => return Some(Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [0_u8; 3],
-                        flags: CqeOpcode::RespondWithFd as u8,
-                        result: fd as u64,
-                    })),
-                },
-                Opcode::Rmdir => scheme.rmdir(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid).transpose()?,
-                Opcode::Unlink => scheme.unlink(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid).transpose()?,
-                Opcode::Dup => match scheme.xdup(a, slice::from_raw_parts(b as *const u8, c), &ctx).transpose()? {
-                    Ok(OpenResult::ThisScheme { number, flags }) => return Some(Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [flags.bits(), 0, 0],
-                        flags: CqeOpcode::RespondRegular as u8,
-                        result: number as u64,
-                    })),
-                    Err(err) => Err(err),
-                    Ok(OpenResult::OtherScheme { fd }) => return Some(Response(Cqe {
-                        tag: self.inner.sqe.tag,
-                        extra_raw: [0_u8; 3],
-                        flags: CqeOpcode::RespondWithFd as u8,
-                        result: fd as u64,
-                    })),
-                }
-                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c), args[3], args[4] as u32).transpose()?,
-                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c), args[3], args[4] as u32).transpose()?,
-
-                // TODO: 64-bit offset on 32-bit platforms
-                Opcode::Fsize => scheme.fsize(a).transpose()?.map(|o| o as usize),
-                Opcode::Fchmod => scheme.fchmod(a, b as u16).transpose()?,
-                Opcode::Fchown => scheme.fchown(a, b as u32, c as u32).transpose()?,
-                Opcode::Fcntl => scheme.fcntl(a, b, c).transpose()?,
-                Opcode::Fevent => scheme.fevent(a, EventFlags::from_bits_retain(b)).transpose()?.map(|fl| fl.bits()),
-                Opcode::Fpath => scheme.fpath(a, slice::from_raw_parts_mut(b as *mut u8, c)).transpose()?,
-                Opcode::Frename => scheme.frename(a, str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)), hack_uid, hack_gid).transpose()?,
-                Opcode::Fstat => {
-                    assert!(c >= size_of::<Stat>());
-                    scheme.fstat(a, &mut *(b as *mut Stat)).transpose()?
-                }
-                Opcode::Fstatvfs => {
-                    assert!(c >= size_of::<StatVfs>());
-                    scheme.fstatvfs(a, &mut *(b as *mut StatVfs)).transpose()?
-                }
-                Opcode::Fsync => scheme.fsync(a).transpose()?,
-                Opcode::Ftruncate => scheme.ftruncate(a, b).transpose()?,
-                Opcode::Futimens => {
-                    assert!(c <= 2 * core::mem::size_of::<TimeSpec>());
-                    scheme.futimens(a, slice::from_raw_parts(b as *const TimeSpec, c / core::mem::size_of::<TimeSpec>())).transpose()?
-                }
-
-                Opcode::Close => scheme.close(a).transpose()?,
-
-                Opcode::MmapPrep => scheme.mmap_prep(a, args[3], b, MapFlags::from_bits_retain(c)).transpose()?,
-                Opcode::Munmap => scheme.munmap(a, args[3], b, MunmapFlags::from_bits_retain(c)).transpose()?,
-
-                _ => return Some(Response::new(&self, Err(Error::new(EOPNOTSUPP)))),
-            }
-        };
-        Some(Response::<V2>::new(&self, result))
     }
 }
 
