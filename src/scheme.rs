@@ -86,17 +86,17 @@ impl<'a> Op<'a> {
                 Op::Frename { fd: packet.b, new_path, caller: CallerCtx::from_packet(&packet) }
             }
             SYS_FSTAT => {
-                assert!(packet.d < mem::size_of::<Stat>(), "too small Stat from kernel");
+                assert!(packet.d >= mem::size_of::<Stat>(), "too small Stat from kernel");
                 Op::Fstat { fd: packet.b, stat: &mut *(packet.c as *mut Stat), caller: CallerCtx::from_packet(&packet) }
             }
             SYS_FSTATVFS => {
-                assert!(packet.d < mem::size_of::<StatVfs>(), "too small StatVfs from kernel");
+                assert!(packet.d >= mem::size_of::<StatVfs>(), "too small StatVfs from kernel");
                 Op::FstatVfs { fd: packet.b, stat: &mut *(packet.c as *mut StatVfs), caller: CallerCtx::from_packet(&packet) }
             }
             SYS_FSYNC => Op::Fsync { fd: packet.b, caller: CallerCtx::from_packet(&packet) },
             SYS_FTRUNCATE => Op::Ftruncate { fd: packet.b, new_sz: packet.c, caller: CallerCtx::from_packet(&packet) },
             SYS_FUTIMENS => {
-                assert!(packet.d < mem::size_of::<TimeSpec>(), "too small TimeSpec from kernel");
+                assert!(packet.d >= mem::size_of::<TimeSpec>(), "too small TimeSpec from kernel");
                 Op::Futimens { fd: packet.b, times: {
                     slice::from_raw_parts(
                         packet.c as *const TimeSpec,
