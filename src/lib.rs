@@ -1,10 +1,15 @@
+#![no_std]
+
+extern crate alloc;
+use alloc::format;
+
+use core::marker::PhantomData;
 use core::{slice, str};
 
 use libredox::flag;
 use syscall::schemev2::{Cqe, CqeOpcode, Opcode, Sqe};
 use syscall::{
-    Error, Packet, Result, EINTR, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC,
-    KSMSG_MUNMAP, SKMSG_FRETURNFD,
+    Error, EventFlags, Packet, Result, Stat, EBADF, EINTR, ENOENT, EOPNOTSUPP, ESKMSG, ESPIPE, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP, O_FSYNC, SKMSG_FRETURNFD
 };
 
 pub use self::scheme::Scheme;
@@ -86,17 +91,21 @@ pub struct Request<V: Version = V2> {
     sqe: V::RawSqe,
 }
 mod private {
+    use core::ops::Deref;
+
     use super::*;
 
     pub trait Impl: Copy + Clone + core::fmt::Debug + Default {
         type RawSqe: core::fmt::Debug + Clone + Copy + Default;
-        type RawCqe: core::fmt::Debug + Clone + Copy + Default;
+        type RawCqe: core::fmt::Debug + Clone + Copy + Default + Deref<Target = [u8]>;
+        const OPEN_FLAGS: i32 = 0;
 
         fn sqe_context_id(s: &Self::RawSqe) -> usize;
         fn sqe_request_id(s: &Self::RawSqe) -> Id;
         fn sqe_kind(s: Self::RawSqe) -> RequestKind<Self>;
 
         fn create_cqe(req: &CallRequest<Self>, status: Result<usize>) -> Self::RawCqe;
+        fn post_fevent_cqe(fd: usize, flags: usize) -> Self::RawCqe;
     }
 }
 pub trait Version: private::Impl {}
@@ -148,10 +157,21 @@ impl private::Impl for Legacy {
             ..Packet::default()
         }
     }
+    fn post_fevent_cqe(fd: usize, flags: usize) -> Packet {
+        syscall::Packet {
+            a: syscall::SYS_FEVENT,
+            b: fd,
+            c: flags,
+            d: 0,
+            ..Default::default()
+        }
+    }
 }
 impl private::Impl for V2 {
     type RawSqe = Sqe;
     type RawCqe = Cqe;
+
+    const OPEN_FLAGS: i32 = O_FSYNC as i32;
 
     fn sqe_context_id(s: &Sqe) -> usize {
         s.caller as usize
@@ -177,6 +197,14 @@ impl private::Impl for V2 {
             extra_raw: [0_u8; 3],
             result: Error::mux(status) as u64,
             tag: req.inner.sqe.tag,
+        }
+    }
+    fn post_fevent_cqe(fd: usize, flags: usize) -> Cqe {
+        Cqe {
+            flags: CqeOpcode::SendFevent as u8,
+            extra_raw: [0_u8; 3],
+            tag: flags as u32,
+            result: fd as u64,
         }
     }
 }
@@ -245,6 +273,77 @@ impl CallRequest<Legacy> {
         }
     }
 }
+impl CallRequest<V2> {
+    pub fn handle_scheme_mut(self, scheme: &mut impl SchemeV2) -> Response<V2> {
+        let Some(opcode) = Opcode::try_from_raw(self.inner.sqe.opcode) else {
+            return Response::new(&self, Err(Error::new(EOPNOTSUPP)));
+        };
+        let args = self.inner.sqe.args;
+        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
+        let result = unsafe {
+            use core::{str, slice};
+            match opcode {
+                Opcode::Open => match scheme.open(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), c) {
+                    Ok(OpenResult::ThisScheme { number }) => Ok(number),
+                    Err(err) => Err(err),
+                    Ok(OpenResult::OtherScheme { fd }) => return Response(Cqe {
+                        tag: self.inner.sqe.tag,
+                        extra_raw: [0_u8; 3],
+                        flags: CqeOpcode::RespondWithFd as u8,
+                        result: fd as u64,
+                    }),
+                },
+                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c)),
+                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c)),
+
+                // TODO: 64-bit offset on 32-bit platforms
+                Opcode::Lseek => scheme.seek(a, args[1] as i64, c).map(|o| o as usize),
+                Opcode::Fcntl => scheme.fcntl(a, b, c),
+                Opcode::Fpath => scheme.fpath(a, slice::from_raw_parts_mut(b as *mut u8, c)),
+                Opcode::Fstat => {
+                    assert!(c >= size_of::<Stat>());
+                    scheme.fstat(a, &mut *(b as *mut Stat))
+                }
+                Opcode::Fsync => scheme.fsync(a).map(|()| 0),
+
+                Opcode::Close => scheme.close(a).map(|()| 0),
+
+                _ => return Response::new(&self, Err(Error::new(EOPNOTSUPP))),
+            }
+        };
+        Response::<V2>::new(&self, result)
+    }
+}
+#[allow(unused_variables)]
+pub trait SchemeV2 {
+    fn open(&mut self, path: &str, flags: usize) -> Result<OpenResult> {
+        Err(Error::new(ENOENT))
+    }
+    fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+    fn write(&mut self, fd: usize, buf: &[u8]) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+    fn seek(&mut self, fd: usize, pos: i64, whence: usize) -> Result<u64> {
+        Err(Error::new(ESPIPE))
+    }
+    fn fcntl(&mut self, fd: usize, cmd: usize, arg: usize) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+    fn fstat(&mut self, fd: usize, stat: &mut Stat) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+    fn fpath(&mut self, fd: usize, path: &mut [u8]) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+    fn fsync(&mut self, fd: usize) -> Result<()> {
+        Ok(())
+    }
+    fn close(&mut self, fd: usize) -> Result<()> {
+        Ok(())
+    }
+}
 
 impl<V: Version> Request<V> {
     #[inline]
@@ -260,11 +359,14 @@ impl<V: Version> Request<V> {
     }
 }
 
-pub struct Socket(libredox::Fd);
+pub struct Socket<V: Version = V2> {
+    inner: libredox::Fd,
+    _marker: PhantomData<fn() -> V>,
+}
 
-impl Socket {
+impl<V: Version> Socket<V> {
     fn create_inner(name: &str, nonblock: bool) -> Result<Self> {
-        let mut flags = 0;
+        let mut flags = V::OPEN_FLAGS;
 
         if nonblock {
             flags |= flag::O_NONBLOCK;
@@ -275,7 +377,7 @@ impl Socket {
             flag::O_CLOEXEC | flag::O_CREAT | flags,
             0,
         )?;
-        Ok(Self(fd))
+        Ok(Self { inner: fd, _marker: PhantomData })
     }
     pub fn create(name: impl AsRef<str>) -> Result<Self> {
         Self::create_inner(name.as_ref(), false)
@@ -284,7 +386,7 @@ impl Socket {
         Self::create_inner(name.as_ref(), true)
     }
     pub fn read_requests(&self, buf: &mut [Request], behavior: SignalBehavior) -> Result<usize> {
-        read_requests(self.0.raw(), buf, behavior)
+        read_requests(self.inner.raw(), buf, behavior)
     }
     pub fn next_request(&self, behavior: SignalBehavior) -> Result<Option<Request>> {
         let mut buf = [Request::default()];
@@ -295,23 +397,17 @@ impl Socket {
         })
     }
     pub fn write_responses(&self, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
-        write_responses(self.0.raw(), buf, behavior)
+        write_responses(self.inner.raw(), buf, behavior)
     }
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
         Ok(self.write_responses(&[resp], behavior)? > 0)
     }
     pub fn post_fevent(&self, id: usize, flags: usize) -> Result<()> {
-        self.0.write(&syscall::Packet {
-            a: syscall::SYS_FEVENT,
-            b: id,
-            c: flags,
-            d: 0,
-            ..Default::default()
-        })?;
+        self.inner.write(&V::post_fevent_cqe(id, flags))?;
         Ok(())
     }
     pub fn inner(&self) -> &libredox::Fd {
-        &self.0
+        &self.inner
     }
 }
 
