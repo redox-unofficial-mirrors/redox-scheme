@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 use core::{slice, str};
 
 use libredox::flag;
-use syscall::schemev2::{Cqe, CqeOpcode, Opcode, Sqe};
+use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 use syscall::{
     Error, EventFlags, MapFlags, MunmapFlags, Packet, Result, Stat, StatVfs, TimeSpec, EBADF, EINTR, ENOENT, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP, O_FSYNC, SKMSG_FRETURNFD
 };
@@ -36,23 +36,23 @@ pub struct CallerCtx {
 }
 
 pub enum OpenResult {
-    ThisScheme { number: usize },
+    ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
 }
 
 // TODO: Find a better solution than generate.sh
 pub(crate) fn convert_to_this_scheme(r: Result<usize>) -> Result<OpenResult> {
-    r.map(|number| OpenResult::ThisScheme { number })
+    r.map(|number| OpenResult::ThisScheme { number, flags: NewFdFlags::empty() })
 }
 pub(crate) fn convert_to_this_scheme_block(r: Result<Option<usize>>) -> Result<Option<OpenResult>> {
-    r.map(|o| o.map(|number| OpenResult::ThisScheme { number }))
+    r.map(|o| o.map(|number| OpenResult::ThisScheme { number, flags: NewFdFlags::empty() }))
 }
 pub(crate) fn convert_in_scheme_handle_block(
     _: &Packet,
     result: Result<Option<OpenResult>>,
 ) -> Result<Option<usize>> {
     match result {
-        Ok(Some(OpenResult::ThisScheme { number })) => Ok(Some(number)),
+        Ok(Some(OpenResult::ThisScheme { number, .. })) => Ok(Some(number)),
         Ok(Some(OpenResult::OtherScheme { .. })) => Err(Error::new(EOPNOTSUPP)),
         Ok(None) => Ok(None),
         Err(err) => Err(err),
@@ -63,7 +63,7 @@ pub(crate) fn convert_in_scheme_handle(
     result: Result<OpenResult>,
 ) -> Result<usize> {
     match result {
-        Ok(OpenResult::ThisScheme { number }) => Ok(number),
+        Ok(OpenResult::ThisScheme { number, .. }) => Ok(number),
         Ok(OpenResult::OtherScheme { fd }) => {
             packet.b = SKMSG_FRETURNFD;
             packet.c = fd;
@@ -293,7 +293,12 @@ impl CallRequest<V2> {
             use core::{str, slice};
             match opcode {
                 Opcode::Open => match scheme.xopen(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), c, &ctx) {
-                    Ok(OpenResult::ThisScheme { number }) => Ok(number),
+                    Ok(OpenResult::ThisScheme { number, flags }) => return Response(Cqe {
+                        tag: self.inner.sqe.tag,
+                        extra_raw: [flags.bits(), 0, 0],
+                        flags: CqeOpcode::RespondRegular as u8,
+                        result: number as u64,
+                    }),
                     Err(err) => Err(err),
                     Ok(OpenResult::OtherScheme { fd }) => return Response(Cqe {
                         tag: self.inner.sqe.tag,
@@ -305,7 +310,12 @@ impl CallRequest<V2> {
                 Opcode::Rmdir => scheme.rmdir(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid),
                 Opcode::Unlink => scheme.unlink(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid),
                 Opcode::Dup => match scheme.xdup(a, slice::from_raw_parts(b as *const u8, c), &ctx) {
-                    Ok(OpenResult::ThisScheme { number }) => Ok(number),
+                    Ok(OpenResult::ThisScheme { number, flags }) => return Response(Cqe {
+                        tag: self.inner.sqe.tag,
+                        extra_raw: [flags.bits(), 0, 0],
+                        flags: CqeOpcode::RespondRegular as u8,
+                        result: number as u64,
+                    }),
                     Err(err) => Err(err),
                     Ok(OpenResult::OtherScheme { fd }) => return Response(Cqe {
                         tag: self.inner.sqe.tag,
@@ -370,7 +380,12 @@ impl CallRequest<V2> {
             use core::{str, slice};
             match opcode {
                 Opcode::Open => match scheme.xopen(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), c, &ctx).transpose()? {
-                    Ok(OpenResult::ThisScheme { number }) => Ok(number),
+                    Ok(OpenResult::ThisScheme { number, flags }) => return Some(Response(Cqe {
+                        tag: self.inner.sqe.tag,
+                        extra_raw: [flags.bits(), 0, 0],
+                        flags: CqeOpcode::RespondRegular as u8,
+                        result: number as u64,
+                    })),
                     Err(err) => Err(err),
                     Ok(OpenResult::OtherScheme { fd }) => return Some(Response(Cqe {
                         tag: self.inner.sqe.tag,
@@ -382,7 +397,12 @@ impl CallRequest<V2> {
                 Opcode::Rmdir => scheme.rmdir(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid).transpose()?,
                 Opcode::Unlink => scheme.unlink(str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)), hack_uid, hack_gid).transpose()?,
                 Opcode::Dup => match scheme.xdup(a, slice::from_raw_parts(b as *const u8, c), &ctx).transpose()? {
-                    Ok(OpenResult::ThisScheme { number }) => Ok(number),
+                    Ok(OpenResult::ThisScheme { number, flags }) => return Some(Response(Cqe {
+                        tag: self.inner.sqe.tag,
+                        extra_raw: [flags.bits(), 0, 0],
+                        flags: CqeOpcode::RespondRegular as u8,
+                        result: number as u64,
+                    })),
                     Err(err) => Err(err),
                     Ok(OpenResult::OtherScheme { fd }) => return Some(Response(Cqe {
                         tag: self.inner.sqe.tag,
