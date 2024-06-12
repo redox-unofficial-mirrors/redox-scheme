@@ -42,15 +42,12 @@ pub trait SchemeBlock {
                     &CallerCtx::from_packet(&packet),
                 ),
             ),
-            SYS_READ => self.read(packet.b, {
+            SYS_READ => self.read_old(packet.b, {
                 slice::from_raw_parts_mut(packet.c as *mut u8, packet.d)
             }),
-            SYS_WRITE => self.write(packet.b, {
+            SYS_WRITE => self.write_old(packet.b, {
                 slice::from_raw_parts(packet.c as *const u8, packet.d)
             }),
-            SYS_LSEEK => self
-                .seek(packet.b, packet.c as isize, packet.d)
-                .map(|o| o.map(|o| o as usize)),
             SYS_FCHMOD => self.fchmod(packet.b, packet.c as u16),
             SYS_FCHOWN => self.fchown(packet.b, packet.c as u32, packet.d as u32),
             SYS_FCNTL => self.fcntl(packet.b, packet.c, packet.d),
@@ -154,18 +151,26 @@ pub trait SchemeBlock {
     }
 
     #[allow(unused_variables)]
-    fn read(&self, id: usize, buf: &mut [u8]) -> Result<Option<usize>> {
+    fn read_old(&self, id: usize, buf: &mut [u8]) -> Result<Option<usize>> {
         Err(Error::new(EBADF))
+    }
+    #[allow(unused_variables)]
+    fn read(&self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32) -> Result<Option<usize>> {
+        self.read_old(id, buf)
     }
 
     #[allow(unused_variables)]
-    fn write(&self, id: usize, buf: &[u8]) -> Result<Option<usize>> {
+    fn write_old(&self, id: usize, buf: &[u8]) -> Result<Option<usize>> {
         Err(Error::new(EBADF))
+    }
+    #[allow(unused_variables)]
+    fn write(&self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32) -> Result<Option<usize>> {
+        self.write_old(id, buf)
     }
 
     #[allow(unused_variables)]
-    fn seek(&self, id: usize, pos: isize, whence: usize) -> Result<Option<isize>> {
-        Err(Error::new(EBADF))
+    fn fsize(&self, id: usize) -> Result<Option<u64>> {
+        Err(Error::new(ESPIPE))
     }
 
     #[allow(unused_variables)]
@@ -229,24 +234,12 @@ pub trait SchemeBlock {
     }
 
     #[allow(unused_variables)]
-    fn mmap_prep(
-        &self,
-        id: usize,
-        offset: u64,
-        size: usize,
-        flags: MapFlags,
-    ) -> Result<Option<usize>> {
+    fn mmap_prep(&self, id: usize, offset: u64, size: usize, flags: MapFlags) -> Result<Option<usize>> {
         Err(Error::new(EOPNOTSUPP))
     }
 
     #[allow(unused_variables)]
-    fn munmap(
-        &self,
-        id: usize,
-        offset: u64,
-        size: usize,
-        flags: MunmapFlags,
-    ) -> Result<Option<usize>> {
+    fn munmap(&self, id: usize, offset: u64, size: usize, flags: MunmapFlags) -> Result<Option<usize>> {
         Err(Error::new(EOPNOTSUPP))
     }
 }

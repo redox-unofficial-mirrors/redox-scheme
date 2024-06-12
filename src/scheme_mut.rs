@@ -42,15 +42,12 @@ pub trait SchemeMut {
                     &CallerCtx::from_packet(&packet),
                 ),
             ),
-            SYS_READ => self.read(packet.b, {
+            SYS_READ => self.read_old(packet.b, {
                 slice::from_raw_parts_mut(packet.c as *mut u8, packet.d)
             }),
-            SYS_WRITE => self.write(packet.b, {
+            SYS_WRITE => self.write_old(packet.b, {
                 slice::from_raw_parts(packet.c as *const u8, packet.d)
             }),
-            SYS_LSEEK => self
-                .seek(packet.b, packet.c as isize, packet.d)
-                .map(|o| o as usize),
             SYS_FCHMOD => self.fchmod(packet.b, packet.c as u16),
             SYS_FCHOWN => self.fchown(packet.b, packet.c as u32, packet.d as u32),
             SYS_FCNTL => self.fcntl(packet.b, packet.c, packet.d),
@@ -154,18 +151,26 @@ pub trait SchemeMut {
     }
 
     #[allow(unused_variables)]
-    fn read(&mut self, id: usize, buf: &mut [u8]) -> Result<usize> {
+    fn read_old(&mut self, id: usize, buf: &mut [u8]) -> Result<usize> {
         Err(Error::new(EBADF))
+    }
+    #[allow(unused_variables)]
+    fn read(&mut self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32) -> Result<usize> {
+        self.read_old(id, buf)
     }
 
     #[allow(unused_variables)]
-    fn write(&mut self, id: usize, buf: &[u8]) -> Result<usize> {
+    fn write_old(&mut self, id: usize, buf: &[u8]) -> Result<usize> {
         Err(Error::new(EBADF))
+    }
+    #[allow(unused_variables)]
+    fn write(&mut self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32) -> Result<usize> {
+        self.write_old(id, buf)
     }
 
     #[allow(unused_variables)]
-    fn seek(&mut self, id: usize, pos: isize, whence: usize) -> Result<isize> {
-        Err(Error::new(EBADF))
+    fn fsize(&mut self, id: usize) -> Result<u64> {
+        Err(Error::new(ESPIPE))
     }
 
     #[allow(unused_variables)]

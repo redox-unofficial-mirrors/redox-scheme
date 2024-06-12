@@ -314,11 +314,11 @@ impl CallRequest<V2> {
                         result: fd as u64,
                     }),
                 }
-                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c)),
-                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c)),
+                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c), args[3], args[4] as u32),
+                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c), args[3], args[4] as u32),
 
                 // TODO: 64-bit offset on 32-bit platforms
-                Opcode::Lseek => scheme.seek(a, b as isize, c).map(|o| o as usize),
+                Opcode::Fsize => scheme.fsize(a).map(|o| o as usize),
                 Opcode::Fchmod => scheme.fchmod(a, b as u16),
                 Opcode::Fchown => scheme.fchown(a, b as u32, c as u32),
                 Opcode::Fcntl => scheme.fcntl(a, b, c),
@@ -391,11 +391,11 @@ impl CallRequest<V2> {
                         result: fd as u64,
                     })),
                 }
-                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c)).transpose()?,
-                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c)).transpose()?,
+                Opcode::Read => scheme.read(a, slice::from_raw_parts_mut(b as *mut u8, c), args[3], args[4] as u32).transpose()?,
+                Opcode::Write => scheme.write(a, slice::from_raw_parts(b as *const u8, c), args[3], args[4] as u32).transpose()?,
 
                 // TODO: 64-bit offset on 32-bit platforms
-                Opcode::Lseek => scheme.seek(a, b as isize, c).transpose()?.map(|o| o as usize),
+                Opcode::Fsize => scheme.fsize(a).transpose()?.map(|o| o as usize),
                 Opcode::Fchmod => scheme.fchmod(a, b as u16).transpose()?,
                 Opcode::Fchown => scheme.fchown(a, b as u32, c as u32).transpose()?,
                 Opcode::Fcntl => scheme.fcntl(a, b, c).transpose()?,
