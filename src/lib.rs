@@ -144,7 +144,7 @@ impl private::Impl for Legacy {
                 id: Id(packet.b as u32),
             }),
             KSMSG_MSYNC => RequestKind::MsyncMsg,
-            KSMSG_MUNMAP => RequestKind::MunmapMsg,
+            //KSMSG_MUNMAP => RequestKind::MunmapMsg,
             KSMSG_MMAP => RequestKind::MmapMsg,
 
             _ => RequestKind::Call(CallRequest { inner: Request { sqe: packet } }),
@@ -185,7 +185,7 @@ impl private::Impl for V2 {
                 id: Id(sqe.tag),
             }),
             Some(Opcode::Msync) => RequestKind::MsyncMsg,
-            Some(Opcode::Munmap) => RequestKind::MunmapMsg,
+            //Some(Opcode::Munmap) => RequestKind::MunmapMsg,
             Some(Opcode::RequestMmap) => RequestKind::MmapMsg,
 
             _ => RequestKind::Call(CallRequest { inner: Request { sqe } }),
