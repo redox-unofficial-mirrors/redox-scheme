@@ -9,9 +9,7 @@ use core::str;
 
 use libredox::flag;
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
-use syscall::{
-    Error, Packet, Result, EINTR, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, O_FSYNC,
-};
+use syscall::{Error, Result, EINTR, O_FSYNC};
 
 pub mod scheme;
 
@@ -24,16 +22,6 @@ pub struct CallerCtx {
 pub enum OpenResult {
     ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
-}
-
-impl CallerCtx {
-    pub fn from_packet(packet: &Packet) -> Self {
-        Self {
-            pid: packet.pid,
-            uid: packet.uid,
-            gid: packet.gid,
-        }
-    }
 }
 
 use core::mem::size_of;
@@ -64,14 +52,7 @@ mod private {
 pub trait Version: private::Impl {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum Legacy {}
-#[derive(Clone, Copy, Debug)]
 pub enum V2 {}
-impl Default for Legacy {
-    fn default() -> Self {
-        unreachable!()
-    }
-}
 impl Default for V2 {
     fn default() -> Self {
         unreachable!()
@@ -79,47 +60,6 @@ impl Default for V2 {
 }
 impl<V: private::Impl> Version for V {}
 
-impl private::Impl for Legacy {
-    type RawSqe = Packet;
-    type RawCqe = Packet;
-
-    fn sqe_context_id(s: &Packet) -> usize {
-        s.pid
-    }
-    fn sqe_request_id(s: &Packet) -> Id {
-        Id(s.id as u32)
-    }
-    fn sqe_kind(packet: Self::RawSqe) -> RequestKind<Self> {
-        // TODO: Should KSMSG_MMAP_PREP be a regular scheme call?
-
-        match packet.a {
-            KSMSG_CANCEL => RequestKind::Cancellation(CancellationRequest {
-                id: Id(packet.b as u32),
-            }),
-            KSMSG_MSYNC => RequestKind::MsyncMsg,
-            //KSMSG_MUNMAP => RequestKind::MunmapMsg,
-            KSMSG_MMAP => RequestKind::MmapMsg,
-
-            _ => RequestKind::Call(CallRequest { inner: Request { sqe: packet } }),
-        }
-    }
-    fn create_cqe(req: &CallRequest<Self>, status: Result<usize>) -> Packet {
-        Packet {
-            a: Error::mux(status),
-            id: req.inner.sqe.id,
-            ..Packet::default()
-        }
-    }
-    fn post_fevent_cqe(fd: usize, flags: usize) -> Packet {
-        syscall::Packet {
-            a: syscall::SYS_FEVENT,
-            b: fd,
-            c: flags,
-            d: 0,
-            ..Default::default()
-        }
-    }
-}
 impl private::Impl for V2 {
     type RawSqe = Sqe;
     type RawCqe = Cqe;

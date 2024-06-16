@@ -1,5 +1,6 @@
 #![allow(async_fn_in_trait)]
 
+use core::mem::size_of;
 use syscall::schemev2::{Cqe, CqeOpcode, Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
 
@@ -66,8 +67,8 @@ impl<'a> Op<'a> {
             Opcode::Fsync => Op::Fsync { fd: a },
             Opcode::Ftruncate => Op::Ftruncate { fd: a, new_sz: args[1] },
             Opcode::Futimens => {
-                assert!(c <= 2 * core::mem::size_of::<TimeSpec>());
-                Op::Futimens { fd: a, times: slice::from_raw_parts(b as *const TimeSpec, c / core::mem::size_of::<TimeSpec>()) }
+                assert!(c <= 2 * size_of::<TimeSpec>());
+                Op::Futimens { fd: a, times: slice::from_raw_parts(b as *const TimeSpec, c / size_of::<TimeSpec>()) }
             }
 
             Opcode::Close => Op::Close { fd: a },
