@@ -247,11 +247,9 @@ pub trait SchemeAsync {
         Err(Error::new(EBADF))
     }
 
-
-    async fn read(&self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
+    async fn read(&mut self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EBADF))
     }
-
 
     async fn write(&mut self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EBADF))
@@ -343,11 +341,9 @@ pub trait SchemeSync {
         Err(Error::new(EBADF))
     }
 
-
-    fn read(&self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
+    fn read(&mut self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EBADF))
     }
-
 
     fn write(&mut self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32, ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EBADF))
