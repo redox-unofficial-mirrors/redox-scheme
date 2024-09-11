@@ -125,11 +125,6 @@ pub trait SchemeBlockMut {
     }
 
     #[allow(unused_variables)]
-    fn chmod(&mut self, path: &str, mode: u16, uid: u32, gid: u32) -> Result<Option<usize>> {
-        Err(Error::new(ENOENT))
-    }
-
-    #[allow(unused_variables)]
     fn rmdir(&mut self, path: &str, uid: u32, gid: u32) -> Result<Option<usize>> {
         Err(Error::new(ENOENT))
     }
@@ -155,7 +150,13 @@ pub trait SchemeBlockMut {
         Err(Error::new(EBADF))
     }
     #[allow(unused_variables)]
-    fn read(&mut self, id: usize, buf: &mut [u8], offset: u64, fcntl_flags: u32) -> Result<Option<usize>> {
+    fn read(
+        &mut self,
+        id: usize,
+        buf: &mut [u8],
+        offset: u64,
+        fcntl_flags: u32,
+    ) -> Result<Option<usize>> {
         self.read_old(id, buf)
     }
 
@@ -164,7 +165,13 @@ pub trait SchemeBlockMut {
         Err(Error::new(EBADF))
     }
     #[allow(unused_variables)]
-    fn write(&mut self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32) -> Result<Option<usize>> {
+    fn write(
+        &mut self,
+        id: usize,
+        buf: &[u8],
+        offset: u64,
+        fcntl_flags: u32,
+    ) -> Result<Option<usize>> {
         self.write_old(id, buf)
     }
 
@@ -234,12 +241,24 @@ pub trait SchemeBlockMut {
     }
 
     #[allow(unused_variables)]
-    fn mmap_prep(&mut self, id: usize, offset: u64, size: usize, flags: MapFlags) -> Result<Option<usize>> {
+    fn mmap_prep(
+        &mut self,
+        id: usize,
+        offset: u64,
+        size: usize,
+        flags: MapFlags,
+    ) -> Result<Option<usize>> {
         Err(Error::new(EOPNOTSUPP))
     }
 
     #[allow(unused_variables)]
-    fn munmap(&mut self, id: usize, offset: u64, size: usize, flags: MunmapFlags) -> Result<Option<usize>> {
+    fn munmap(
+        &mut self,
+        id: usize,
+        offset: u64,
+        size: usize,
+        flags: MunmapFlags,
+    ) -> Result<Option<usize>> {
         Err(Error::new(EOPNOTSUPP))
     }
 }

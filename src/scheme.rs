@@ -125,11 +125,6 @@ pub trait Scheme {
     }
 
     #[allow(unused_variables)]
-    fn chmod(&self, path: &str, mode: u16, uid: u32, gid: u32) -> Result<usize> {
-        Err(Error::new(ENOENT))
-    }
-
-    #[allow(unused_variables)]
     fn rmdir(&self, path: &str, uid: u32, gid: u32) -> Result<usize> {
         Err(Error::new(ENOENT))
     }
