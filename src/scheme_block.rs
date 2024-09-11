@@ -175,6 +175,7 @@ pub trait SchemeBlock {
         &self,
         id: usize,
         buf: DirentBuf<&'_ mut [u8]>,
+        opaque_offset: u64,
     ) -> Result<Option<DirentBuf<&'_ mut [u8]>>> {
         Err(Error::new(EBADF))
     }

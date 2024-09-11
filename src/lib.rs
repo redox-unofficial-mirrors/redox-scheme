@@ -303,7 +303,7 @@ impl CallRequest<V2> {
             gid: hack_gid,
         };
 
-        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, e, _f] = args.map(|a| a as usize);
         let result = unsafe {
             use core::{slice, str};
             match opcode {
@@ -374,7 +374,9 @@ impl CallRequest<V2> {
                 ),
                 Opcode::Getdents => {
                     DirentBuf::new(slice::from_raw_parts_mut(b as *mut u8, c), d as u16)
-                        .map_or(Err(Error::new(EINVAL)), |buf| scheme.getdents(a, buf))
+                        .map_or(Err(Error::new(EINVAL)), |buf| {
+                            scheme.getdents(a, buf, e as u64)
+                        })
                         .map(|b| b.finalize())
                 }
 
@@ -439,7 +441,7 @@ impl CallRequest<V2> {
             gid: hack_gid,
         };
 
-        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, e, _f] = args.map(|a| a as usize);
         let result = unsafe {
             use core::{slice, str};
             match opcode {
@@ -524,7 +526,9 @@ impl CallRequest<V2> {
 
                 Opcode::Getdents => {
                     DirentBuf::new(slice::from_raw_parts_mut(b as *mut u8, c), d as u16)
-                        .map_or(Err(Error::new(EINVAL)), |buf| scheme.getdents(a, buf))
+                        .map_or(Err(Error::new(EINVAL)), |buf| {
+                            scheme.getdents(a, buf, e as u64)
+                        })
                         .map(|b| b.map(|b| b.finalize()))
                         .transpose()?
                 }
