@@ -165,12 +165,12 @@ pub trait Scheme {
     }
 
     #[allow(unused_variables)]
-    fn getdents(
+    fn getdents<'buf>(
         &self,
         id: usize,
-        buf: DirentBuf<&'_ mut [u8]>,
+        buf: DirentBuf<&'buf mut [u8]>,
         opaque_offset: u64,
-    ) -> Result<DirentBuf<&'_ mut [u8]>> {
+    ) -> Result<DirentBuf<&'buf mut [u8]>> {
         Err(Error::new(EBADF))
     }
 
