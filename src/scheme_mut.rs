@@ -2,6 +2,7 @@ use core::{mem, slice};
 
 use crate::*;
 use syscall::data::*;
+use syscall::dirent::DirentBuf;
 use syscall::error::*;
 use syscall::flag::*;
 use syscall::number::*;
@@ -161,6 +162,15 @@ pub trait SchemeMut {
     #[allow(unused_variables)]
     fn write(&mut self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32) -> Result<usize> {
         self.write_old(id, buf)
+    }
+
+    #[allow(unused_variables)]
+    fn getdents(
+        &mut self,
+        id: usize,
+        buf: DirentBuf<&'_ mut [u8]>,
+    ) -> Result<DirentBuf<&'_ mut [u8]>> {
+        Err(Error::new(EBADF))
     }
 
     #[allow(unused_variables)]

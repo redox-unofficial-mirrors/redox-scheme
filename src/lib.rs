@@ -2,6 +2,7 @@
 
 extern crate alloc;
 use alloc::format;
+use syscall::dirent::DirentBuf;
 
 use core::marker::PhantomData;
 use core::{slice, str};
@@ -10,7 +11,7 @@ use libredox::flag;
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 use syscall::{
     Error, EventFlags, MapFlags, MunmapFlags, Packet, Result, Stat, StatVfs, TimeSpec, EBADF,
-    EINTR, ENOENT, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP,
+    EINTR, EINVAL, ENOENT, EOPNOTSUPP, ESKMSG, KSMSG_CANCEL, KSMSG_MMAP, KSMSG_MSYNC, KSMSG_MUNMAP,
     O_FSYNC, SKMSG_FRETURNFD,
 };
 
@@ -302,7 +303,7 @@ impl CallRequest<V2> {
             gid: hack_gid,
         };
 
-        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
         let result = unsafe {
             use core::{slice, str};
             match opcode {
@@ -371,6 +372,11 @@ impl CallRequest<V2> {
                     args[3],
                     args[4] as u32,
                 ),
+                Opcode::Getdents => {
+                    DirentBuf::new(slice::from_raw_parts_mut(b as *mut u8, c), d as u16)
+                        .map_or(Err(Error::new(EINVAL)), |buf| scheme.getdents(a, buf))
+                        .map(|b| b.finalize())
+                }
 
                 // TODO: 64-bit offset on 32-bit platforms
                 Opcode::Fsize => scheme.fsize(a).map(|o| o as usize),
@@ -433,7 +439,7 @@ impl CallRequest<V2> {
             gid: hack_gid,
         };
 
-        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
         let result = unsafe {
             use core::{slice, str};
             match opcode {
@@ -515,6 +521,13 @@ impl CallRequest<V2> {
                         args[4] as u32,
                     )
                     .transpose()?,
+
+                Opcode::Getdents => {
+                    DirentBuf::new(slice::from_raw_parts_mut(b as *mut u8, c), d as u16)
+                        .map_or(Err(Error::new(EINVAL)), |buf| scheme.getdents(a, buf))
+                        .map(|b| b.map(|b| b.finalize()))
+                        .transpose()?
+                }
 
                 // TODO: 64-bit offset on 32-bit platforms
                 Opcode::Fsize => scheme.fsize(a).transpose()?.map(|o| o as usize),

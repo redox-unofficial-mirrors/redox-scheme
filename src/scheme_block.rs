@@ -2,6 +2,7 @@ use core::{mem, slice};
 
 use crate::*;
 use syscall::data::*;
+use syscall::dirent::DirentBuf;
 use syscall::error::*;
 use syscall::flag::*;
 use syscall::number::*;
@@ -167,6 +168,15 @@ pub trait SchemeBlock {
     #[allow(unused_variables)]
     fn write(&self, id: usize, buf: &[u8], offset: u64, fcntl_flags: u32) -> Result<Option<usize>> {
         self.write_old(id, buf)
+    }
+
+    #[allow(unused_variables)]
+    fn getdents(
+        &self,
+        id: usize,
+        buf: DirentBuf<&'_ mut [u8]>,
+    ) -> Result<Option<DirentBuf<&'_ mut [u8]>>> {
+        Err(Error::new(EBADF))
     }
 
     #[allow(unused_variables)]
