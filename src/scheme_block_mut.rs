@@ -183,7 +183,7 @@ pub trait SchemeBlockMut {
         buf: DirentBuf<&'buf mut [u8]>,
         opaque_offset: u64,
     ) -> Result<Option<DirentBuf<&'buf mut [u8]>>> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     #[allow(unused_variables)]
