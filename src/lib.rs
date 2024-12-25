@@ -13,15 +13,11 @@ use syscall::{
     EINTR, EINVAL, ENOENT, EOPNOTSUPP,
 };
 
-pub use self::scheme::Scheme;
 pub use self::scheme_block::SchemeBlock;
-pub use self::scheme_block_mut::SchemeBlockMut;
-pub use self::scheme_mut::SchemeMut;
+pub use self::scheme::Scheme;
 
-mod scheme;
 mod scheme_block;
-mod scheme_block_mut;
-mod scheme_mut;
+mod scheme;
 
 pub struct CallerCtx {
     pub pid: usize,
@@ -98,7 +94,7 @@ impl CallRequest {
 }
 
 impl CallRequest {
-    pub fn handle_scheme_mut(self, scheme: &mut impl SchemeMut) -> Response {
+    pub fn handle_scheme(self, scheme: &mut impl Scheme) -> Response {
         let Some(opcode) = Opcode::try_from_raw(self.inner.sqe.opcode) else {
             return Response::new(&self, Err(Error::new(EOPNOTSUPP)));
         };
@@ -236,7 +232,7 @@ impl CallRequest {
         Response::new(&self, result)
     }
     // TODO: Copy paste is bad, but ./generate.sh is worse
-    pub fn handle_scheme_block_mut(self, scheme: &mut impl SchemeBlockMut) -> Option<Response> {
+    pub fn handle_scheme_block(self, scheme: &mut impl SchemeBlock) -> Option<Response> {
         let Some(opcode) = Opcode::try_from_raw(self.inner.sqe.opcode) else {
             return Some(Response::new(&self, Err(Error::new(EOPNOTSUPP))));
         };
