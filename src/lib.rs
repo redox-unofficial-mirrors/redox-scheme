@@ -9,8 +9,8 @@ use core::str;
 use libredox::flag;
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 use syscall::{
-    Error, EventFlags, MapFlags, MunmapFlags, Packet, Result, Stat, StatVfs, TimeSpec, EBADF,
-    EINTR, EINVAL, ENOENT, EOPNOTSUPP,
+    Error, EventFlags, FobtainFdFlags, MapFlags, MunmapFlags, Packet, Result, SendFdFlags, Stat,
+    StatVfs, TimeSpec, EBADF, EINTR, EINVAL, ENOENT, EOPNOTSUPP,
 };
 
 pub use self::scheme_block::SchemeBlock;
@@ -78,9 +78,14 @@ pub struct CallRequest {
     inner: Request,
 }
 
+pub struct SendFdRequest {
+    inner: Request,
+}
+
 pub enum RequestKind {
     Call(CallRequest),
     Cancellation(CancellationRequest),
+    SendFd(SendFdRequest),
     MsyncMsg,
     MunmapMsg,
     MmapMsg,
@@ -397,6 +402,51 @@ impl CallRequest {
     }
 }
 
+impl SendFdRequest {
+    #[inline]
+    pub fn request(&self) -> Request {
+        self.inner
+    }
+
+    pub fn id(&self) -> usize {
+        self.inner.sqe.args[0] as usize
+    }
+
+    pub fn flags(&self) -> SendFdFlags {
+        SendFdFlags::from_bits_retain(self.inner.sqe.args[1] as usize)
+    }
+
+    pub fn obtain_fd(
+        &self,
+        socket: &Socket,
+        flags: FobtainFdFlags,
+        dst_fd_or_ptr: Result<usize, &mut usize>,
+    ) -> Result<()> {
+        assert!(!flags.contains(FobtainFdFlags::MANUAL_FD));
+        match dst_fd_or_ptr {
+            Ok(dst_fd) => {
+                socket.inner.write(&Cqe {
+                    flags: CqeOpcode::ObtainFd as u8,
+                    extra_raw: usize::to_ne_bytes((flags | FobtainFdFlags::MANUAL_FD).bits())[..3]
+                        .try_into()
+                        .unwrap(),
+                    tag: self.inner.request_id().0,
+                    result: dst_fd as u64,
+                })?;
+            }
+            Err(ptr) => {
+                socket.inner.write(&Cqe {
+                    flags: CqeOpcode::ObtainFd as u8,
+                    extra_raw: usize::to_ne_bytes(flags.bits())[..3].try_into().unwrap(),
+                    tag: self.inner.request_id().0,
+                    result: ptr as *mut usize as u64,
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Request {
     #[inline]
     pub fn context_id(&self) -> usize {
@@ -410,6 +460,9 @@ impl Request {
         match Opcode::try_from_raw(self.sqe.opcode) {
             Some(Opcode::Cancel) => RequestKind::Cancellation(CancellationRequest {
                 id: Id(self.sqe.tag),
+            }),
+            Some(Opcode::Sendfd) => RequestKind::SendFd(SendFdRequest {
+                inner: Request { sqe: self.sqe },
             }),
             Some(Opcode::Msync) => RequestKind::MsyncMsg,
             //Some(Opcode::Munmap) => RequestKind::MunmapMsg,
@@ -484,6 +537,15 @@ pub struct Response(Cqe);
 
 impl Response {
     pub fn new(req: &CallRequest, status: Result<usize>) -> Self {
+        Self(Cqe {
+            flags: CqeOpcode::RespondRegular as u8,
+            extra_raw: [0_u8; 3],
+            result: Error::mux(status) as u64,
+            tag: req.inner.sqe.tag,
+        })
+    }
+
+    pub fn for_sendfd(req: &SendFdRequest, status: Result<usize>) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
