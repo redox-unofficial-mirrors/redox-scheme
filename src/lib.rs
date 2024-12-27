@@ -6,9 +6,9 @@ use alloc::format;
 use core::str;
 
 use libredox::flag;
-use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
-use syscall::error::{Result, Error, EINTR};
+use syscall::error::{Error, Result, EINTR};
 use syscall::flag::{FobtainFdFlags, SendFdFlags};
+use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
 pub mod scheme;
 
@@ -209,6 +209,29 @@ impl Response {
             extra_raw: [0_u8; 3],
             result: Error::mux(status) as u64,
             tag: req.inner.sqe.tag,
+        })
+    }
+    pub fn open_dup_like(req: &CallRequest, res: Result<OpenResult>) -> Response {
+        match res {
+            Ok(OpenResult::ThisScheme { number, flags }) => {
+                Response::new(&req, Ok(number)).with_extra([flags.bits(), 0, 0])
+            }
+            Err(e) => Response::new(&req, Err(e)),
+            Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(&req, fd),
+        }
+    }
+    pub fn return_external_fd(req: &CallRequest, fd: usize) -> Self {
+        Self(Cqe {
+            flags: CqeOpcode::RespondWithFd as u8,
+            extra_raw: [0_u8; 3],
+            result: fd as u64,
+            tag: req.inner.sqe.tag,
+        })
+    }
+    pub fn with_extra(self, extra: [u8; 3]) -> Self {
+        Self(Cqe {
+            extra_raw: extra,
+            ..self.0
         })
     }
 
