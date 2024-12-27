@@ -1,6 +1,7 @@
 #![allow(async_fn_in_trait)]
 
 use core::mem::size_of;
+use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Cqe, CqeOpcode, Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
 
@@ -295,6 +296,15 @@ pub trait SchemeAsync {
         Err(Error::new(EBADF))
     }
 
+    async fn getdents<'buf>(
+        &mut self,
+        id: usize,
+        buf: DirentBuf<&'buf mut [u8]>,
+        opaque_offset: u64,
+    ) -> Result<DirentBuf<&'buf mut [u8]>> {
+        Err(Error::new(EBADF))
+    }
+
     async fn mmap_prep(&mut self, id: usize, offset: u64, size: usize, flags: MapFlags, ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
@@ -379,6 +389,15 @@ pub trait SchemeSync {
     }
 
     fn futimens(&mut self, id: usize, times: &[TimeSpec], ctx: &CallerCtx) -> Result<()> {
+        Err(Error::new(EBADF))
+    }
+
+    fn getdents<'buf>(
+        &mut self,
+        id: usize,
+        buf: DirentBuf<&'buf mut [u8]>,
+        opaque_offset: u64,
+    ) -> Result<DirentBuf<&'buf mut [u8]>> {
         Err(Error::new(EBADF))
     }
 
