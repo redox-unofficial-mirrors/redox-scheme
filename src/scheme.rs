@@ -204,7 +204,7 @@ impl<'a> Op<'a> {
             Opcode::Call => Op::Call {
                 fd: a,
                 payload: slice::from_raw_parts_mut(b as *mut u8, c),
-                metadata: &sqe.args[1..],
+                metadata: &sqe.args[3..],
             },
             Opcode::Getdents => Op::Getdents {
                 fd: a,
