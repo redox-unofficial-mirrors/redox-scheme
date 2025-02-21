@@ -122,11 +122,6 @@ pub trait Scheme {
     }
 
     #[allow(unused_variables)]
-    fn close(&mut self, id: usize) -> Result<usize> {
-        Err(Error::new(EBADF))
-    }
-
-    #[allow(unused_variables)]
     fn mmap_prep(&mut self, id: usize, offset: u64, size: usize, flags: MapFlags) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }

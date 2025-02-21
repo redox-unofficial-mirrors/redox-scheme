@@ -13,11 +13,11 @@ use syscall::{
     StatVfs, TimeSpec, EBADF, EINTR, EINVAL, ENOENT, EOPNOTSUPP,
 };
 
-pub use self::scheme_block::SchemeBlock;
 pub use self::scheme::Scheme;
+pub use self::scheme_block::SchemeBlock;
 
-mod scheme_block;
 mod scheme;
+mod scheme_block;
 
 pub struct CallerCtx {
     pub pid: usize,
@@ -89,6 +89,7 @@ pub enum RequestKind {
     MsyncMsg,
     MunmapMsg,
     MmapMsg,
+    OnClose { id: usize },
 }
 
 impl CallRequest {
@@ -225,8 +226,6 @@ impl CallRequest {
                         ),
                     )
                 }
-
-                Opcode::Close => scheme.close(a),
 
                 Opcode::MmapPrep => scheme.mmap_prep(a, args[3], b, MapFlags::from_bits_retain(c)),
                 Opcode::Munmap => scheme.munmap(a, args[3], b, MunmapFlags::from_bits_retain(c)),
@@ -386,8 +385,6 @@ impl CallRequest {
                         .transpose()?
                 }
 
-                Opcode::Close => scheme.close(a).transpose()?,
-
                 Opcode::MmapPrep => scheme
                     .mmap_prep(a, args[3], b, MapFlags::from_bits_retain(c))
                     .transpose()?,
@@ -467,6 +464,9 @@ impl Request {
             Some(Opcode::Msync) => RequestKind::MsyncMsg,
             //Some(Opcode::Munmap) => RequestKind::MunmapMsg,
             Some(Opcode::RequestMmap) => RequestKind::MmapMsg,
+            Some(Opcode::CloseMsg) => RequestKind::OnClose {
+                id: self.sqe.args[0] as usize,
+            },
 
             _ => RequestKind::Call(CallRequest {
                 inner: Request { sqe: self.sqe },
@@ -481,7 +481,7 @@ pub struct Socket {
 
 impl Socket {
     fn create_inner(name: &str, nonblock: bool) -> Result<Self> {
-        let mut flags = flag::O_FSYNC;
+        let mut flags = flag::O_FSYNC | 0x0020_0000 /* O_EXLOCK */;
 
         if nonblock {
             flags |= flag::O_NONBLOCK;
