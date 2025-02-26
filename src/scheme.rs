@@ -8,6 +8,7 @@ use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
 use crate::{CallRequest, CallerCtx, OpenResult, Response};
 
 #[non_exhaustive]
+#[derive(Debug)]
 pub enum Op<'a> {
     Open {
         path: &'a str,
