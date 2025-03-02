@@ -885,4 +885,31 @@ impl<F> IntoTag for OpPathLike<F> {
         self.req
     }
 }
-// TODO: Maybe also IntoTag for Op?
+impl IntoTag for Op {
+    fn into_tag(self) -> Tag {
+        use Op::*;
+        match self {
+            Open(op) => op.into_tag(),
+            Rmdir(op) | Self::Unlink(op) => op.into_tag(),
+            Dup(op) => op.into_tag(),
+            Read(op) => op.into_tag(),
+            Write(op) => op.into_tag(),
+            Fsize { req, .. }
+            | Fchmod { req, .. }
+            | Fchown { req, .. }
+            | Fcntl { req, .. }
+            | Fevent { req, .. }
+            | Fsync { req, .. }
+            | Ftruncate { req, .. }
+            | MmapPrep { req, .. }
+            | Munmap { req, .. } => req,
+            Fpath(op) => op.into_tag(),
+            Frename(op) => op.into_tag(),
+            Fstat(op) => op.into_tag(),
+            FstatVfs(op) => op.into_tag(),
+            Futimens(op) => op.into_tag(),
+            Call(op) => op.into_tag(),
+            Getdents(op) => op.into_tag(),
+        }
+    }
+}
