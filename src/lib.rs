@@ -4,6 +4,7 @@ extern crate alloc;
 use alloc::format;
 
 use core::str;
+use core::task::Poll;
 
 use libredox::flag;
 use syscall::error::{Error, Result, EINTR};
@@ -215,6 +216,23 @@ impl Socket {
 pub struct Response(Cqe);
 
 impl Response {
+    #[inline]
+    pub fn err(err: i32, req: impl IntoTag) -> Self {
+        Self::new(Err(Error::new(err)), req)
+    }
+    #[inline]
+    pub fn ok(status: usize, req: impl IntoTag) -> Self {
+        Self::new(Ok(status), req)
+    }
+    #[inline]
+    pub fn ready_ok(status: usize, req: impl IntoTag) -> Poll<Self> {
+        Poll::Ready(Self::ok(status, req))
+    }
+    #[inline]
+    pub fn ready_err(err: i32, req: impl IntoTag) -> Poll<Self> {
+        Poll::Ready(Self::err(err, req))
+    }
+
     pub fn new(status: Result<usize>, req: impl IntoTag) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
