@@ -366,13 +366,13 @@ impl CallRequest {
 
         let op = match self.op() {
             Ok(op) => op,
-            Err(this) => return Ok(Response::new(this, Err(Error::new(ENOSYS)))),
+            Err(this) => return Ok(Response::new(Err(Error::new(ENOSYS)), this)),
         };
 
         let (res, tag) = match op {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller).await;
-                return Ok(Response::open_dup_like(req, res));
+                return Ok(Response::open_dup_like(res, req));
             }
             Op::Rmdir(req) => (
                 s.rmdir(req.path(), &caller).await.map(|()| 0),
@@ -385,7 +385,7 @@ impl CallRequest {
 
             Op::Dup(req) => {
                 let res = s.dup(req.fd, req.buf(), &caller).await;
-                return Ok(Response::open_dup_like(req, res));
+                return Ok(Response::open_dup_like(res, req));
             }
             Op::Read(mut req) => {
                 let OpRead {
@@ -475,7 +475,7 @@ impl CallRequest {
                 (Ok(buf.finalize()), req.into_tag())
             }
         };
-        Ok(Response::new(tag, res))
+        Ok(Response::new(res, tag))
     }
     // TODO: Fix function coloring, this is just s/.await//g
     pub fn handle_sync(self, s: &mut impl SchemeSync) -> Result<Response> {
@@ -483,20 +483,20 @@ impl CallRequest {
 
         let op = match self.op() {
             Ok(op) => op,
-            Err(this) => return Ok(Response::new(this, Err(Error::new(ENOSYS)))),
+            Err(this) => return Ok(Response::new(Err(Error::new(ENOSYS)), this)),
         };
 
         let (res, tag) = match op {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller);
-                return Ok(Response::open_dup_like(req, res));
+                return Ok(Response::open_dup_like(res, req));
             }
             Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
             Op::Unlink(req) => (s.unlink(req.path(), &caller).map(|()| 0), req.into_tag()),
 
             Op::Dup(req) => {
                 let res = s.dup(req.fd, req.buf(), &caller);
-                return Ok(Response::open_dup_like(req, res));
+                return Ok(Response::open_dup_like(res, req));
             }
             Op::Read(mut req) => {
                 let OpRead {
@@ -574,7 +574,7 @@ impl CallRequest {
                 (Ok(buf.finalize()), req.into_tag())
             }
         };
-        Ok(Response::new(tag, res))
+        Ok(Response::new(res, tag))
     }
 }
 

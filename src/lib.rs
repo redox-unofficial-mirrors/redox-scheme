@@ -215,7 +215,7 @@ impl Socket {
 pub struct Response(Cqe);
 
 impl Response {
-    pub fn new(req: impl IntoTag, status: Result<usize>) -> Self {
+    pub fn new(status: Result<usize>, req: impl IntoTag) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
@@ -223,16 +223,16 @@ impl Response {
             tag: req.into_tag().0 .0,
         })
     }
-    pub fn open_dup_like(req: impl IntoTag, res: Result<OpenResult>) -> Response {
+    pub fn open_dup_like(res: Result<OpenResult>, req: impl IntoTag) -> Response {
         match res {
             Ok(OpenResult::ThisScheme { number, flags }) => {
-                Response::new(req, Ok(number)).with_extra([flags.bits(), 0, 0])
+                Response::new(Ok(number), req).with_extra([flags.bits(), 0, 0])
             }
-            Err(e) => Response::new(req, Err(e)),
-            Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(req, fd),
+            Err(e) => Response::new(Err(e), req),
+            Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(fd, req),
         }
     }
-    pub fn return_external_fd(req: impl IntoTag, fd: usize) -> Self {
+    pub fn return_external_fd(fd: usize, req: impl IntoTag) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondWithFd as u8,
             extra_raw: [0_u8; 3],
