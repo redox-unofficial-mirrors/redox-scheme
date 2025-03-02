@@ -25,6 +25,8 @@ pub enum OpenResult {
 
 use core::mem::size_of;
 
+use self::scheme::IntoTag;
+
 #[repr(transparent)]
 #[derive(Debug, Default)]
 pub struct Request {
@@ -33,6 +35,9 @@ pub struct Request {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
 pub struct Id(u32);
+
+#[derive(Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
+pub struct Tag(Id);
 
 #[derive(Debug)]
 pub struct CancellationRequest {
@@ -66,12 +71,20 @@ impl CallRequest {
     pub fn request(&self) -> &Request {
         &self.inner
     }
+    #[inline]
+    pub fn request_id(&self) -> Id {
+        Id(self.inner.sqe.tag)
+    }
 }
 
 impl SendFdRequest {
     #[inline]
     pub fn request(&self) -> &Request {
         &self.inner
+    }
+    #[inline]
+    pub fn request_id(&self) -> Id {
+        Id(self.inner.sqe.tag)
     }
 
     pub fn id(&self) -> usize {
@@ -96,7 +109,7 @@ impl SendFdRequest {
                     extra_raw: usize::to_ne_bytes((flags | FobtainFdFlags::MANUAL_FD).bits())[..3]
                         .try_into()
                         .unwrap(),
-                    tag: self.inner.request_id().0,
+                    tag: self.request_id().0,
                     result: dst_fd as u64,
                 })?;
             }
@@ -104,7 +117,7 @@ impl SendFdRequest {
                 socket.inner.write(&Cqe {
                     flags: CqeOpcode::ObtainFd as u8,
                     extra_raw: usize::to_ne_bytes(flags.bits())[..3].try_into().unwrap(),
-                    tag: self.inner.request_id().0,
+                    tag: self.request_id().0,
                     result: ptr as *mut usize as u64,
                 })?;
             }
@@ -117,10 +130,6 @@ impl Request {
     #[inline]
     pub fn context_id(&self) -> usize {
         self.sqe.caller as usize
-    }
-    #[inline]
-    pub fn request_id(&self) -> Id {
-        Id(self.sqe.tag)
     }
     pub fn kind(self) -> RequestKind {
         match Opcode::try_from_raw(self.sqe.opcode) {
@@ -206,15 +215,15 @@ impl Socket {
 pub struct Response(Cqe);
 
 impl Response {
-    pub fn new(req: CallRequest, status: Result<usize>) -> Self {
+    pub fn new(req: impl IntoTag, status: Result<usize>) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
             result: Error::mux(status) as u64,
-            tag: req.inner.sqe.tag,
+            tag: req.into_tag().0 .0,
         })
     }
-    pub fn open_dup_like(req: CallRequest, res: Result<OpenResult>) -> Response {
+    pub fn open_dup_like(req: impl IntoTag, res: Result<OpenResult>) -> Response {
         match res {
             Ok(OpenResult::ThisScheme { number, flags }) => {
                 Response::new(req, Ok(number)).with_extra([flags.bits(), 0, 0])
@@ -223,27 +232,18 @@ impl Response {
             Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(req, fd),
         }
     }
-    pub fn return_external_fd(req: CallRequest, fd: usize) -> Self {
+    pub fn return_external_fd(req: impl IntoTag, fd: usize) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondWithFd as u8,
             extra_raw: [0_u8; 3],
             result: fd as u64,
-            tag: req.inner.sqe.tag,
+            tag: req.into_tag().0 .0,
         })
     }
     pub fn with_extra(self, extra: [u8; 3]) -> Self {
         Self(Cqe {
             extra_raw: extra,
             ..self.0
-        })
-    }
-
-    pub fn for_sendfd(req: SendFdRequest, status: Result<usize>) -> Self {
-        Self(Cqe {
-            flags: CqeOpcode::RespondRegular as u8,
-            extra_raw: [0_u8; 3],
-            result: Error::mux(status) as u64,
-            tag: req.inner.sqe.tag,
         })
     }
 }
