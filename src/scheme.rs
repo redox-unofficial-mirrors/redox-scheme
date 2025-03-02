@@ -112,6 +112,12 @@ pub enum Op<'a> {
 }
 
 impl<'a> Op<'a> {
+    /// Decode the raw SQE into an Op with borrowed buffers passed as slices.
+    ///
+    /// # Safety
+    ///
+    /// Any borrowed buffers will be unmapped whenever a response is sent, which unlike the
+    /// move-based CallRequest API, needs to be managed manually by the caller.
     pub unsafe fn from_sqe_unchecked(sqe: &'a Sqe) -> Option<Op<'a>> {
         let opcode = Opcode::try_from_raw(sqe.opcode)?;
         let args = sqe.args;
@@ -234,202 +240,180 @@ impl<'a> Op<'a> {
     }
 }
 impl CallRequest {
-    pub fn with<T>(self, f: impl FnOnce(Self, &CallerCtx, Op<'_>) -> T) -> Result<T, Response> {
+    pub fn caller(&self) -> CallerCtx {
         let sqe = &self.inner.sqe;
 
-        let caller = CallerCtx {
+        CallerCtx {
             pid: sqe.caller as usize,
             uid: sqe.args[5] as u32,
             gid: (sqe.args[5] >> 32) as u32,
-        };
-
-        let Some(op) = (unsafe { Op::from_sqe_unchecked(sqe) }) else {
-            return Err(Response::new(&self, Err(Error::new(ENOSYS))));
-        };
-
-        Ok(f(self, &caller, op))
+        }
+    }
+    pub fn op(&self) -> Option<Op<'_>> {
+        unsafe { Op::from_sqe_unchecked(&self.inner.sqe) }
     }
     pub async fn handle_async(self, s: &mut impl SchemeAsync) -> Result<Response> {
-        let sqe = &self.inner.sqe;
+        let caller = self.caller();
 
-        let caller = CallerCtx {
-            pid: sqe.caller as usize,
-            uid: sqe.args[5] as u32,
-            gid: (sqe.args[5] >> 32) as u32,
+        let Some(op) = self.op() else {
+            return Ok(Response::new(self, Err(Error::new(ENOSYS))));
         };
 
-        let Some(op) = (unsafe { Op::from_sqe_unchecked(sqe) }) else {
-            return Ok(Response::new(&self, Err(Error::new(ENOSYS))));
+        let res = match op {
+            Op::Open { path, flags } => {
+                let res = s.open(path, flags, &caller).await;
+                return Ok(Response::open_dup_like(self, res));
+            }
+            Op::Rmdir { path } => s.rmdir(path, &caller).await.map(|()| 0),
+            Op::Unlink { path } => s.unlink(path, &caller).await.map(|()| 0),
+
+            Op::Dup { old_fd, buf } => {
+                let res = s.dup(old_fd, buf, &caller).await;
+                return Ok(Response::open_dup_like(self, res));
+            }
+            Op::Read {
+                fd,
+                buf,
+                offset,
+                flags,
+            } => s.read(fd, buf, offset, flags, &caller).await,
+            Op::Write {
+                fd,
+                buf,
+                offset,
+                flags,
+            } => s.write(fd, buf, offset, flags, &caller).await,
+
+            // TODO: Don't convert to usize
+            Op::Fsize { fd } => s.fsize(fd, &caller).await.map(|l| l as usize),
+
+            Op::Fchmod { fd, new_mode } => s.fchmod(fd, new_mode, &caller).await.map(|()| 0),
+            Op::Fchown {
+                fd,
+                new_uid,
+                new_gid,
+            } => s.fchown(fd, new_uid, new_gid, &caller).await.map(|()| 0),
+            Op::Fcntl { fd, cmd, arg } => s.fcntl(fd, cmd, arg, &caller).await,
+            Op::Fevent { fd, req_flags } => {
+                s.fevent(fd, req_flags, &caller).await.map(|f| f.bits())
+            }
+            Op::Fpath { fd, buf } => s.fpath(fd, buf, &caller).await,
+            Op::Frename { fd, new_path } => s.frename(fd, new_path, &caller).await,
+            Op::Fstat { fd, stat } => s.fstat(fd, stat, &caller).await.map(|()| 0),
+            Op::FstatVfs { fd, stat } => s.fstatvfs(fd, stat, &caller).await.map(|()| 0),
+            Op::Fsync { fd } => s.fsync(fd, &caller).await.map(|()| 0),
+            Op::Ftruncate { fd, new_sz } => s.ftruncate(fd, new_sz, &caller).await.map(|()| 0),
+            Op::Futimens { fd, times } => s.futimens(fd, times, &caller).await.map(|()| 0),
+
+            Op::MmapPrep {
+                fd,
+                offset,
+                len,
+                flags,
+            } => s.mmap_prep(fd, offset, len, flags, &caller).await,
+            Op::Munmap {
+                fd,
+                offset,
+                len,
+                flags,
+            } => s.munmap(fd, offset, len, flags, &caller).await.map(|()| 0),
+
+            Op::Call {
+                fd,
+                payload,
+                metadata,
+            } => s.call(fd, payload, metadata).await,
+
+            Op::Getdents {
+                fd,
+                buf,
+                opaque_offset,
+            } => {
+                let buf = s.getdents(fd, buf, opaque_offset).await?;
+                Ok(buf.finalize())
+            }
         };
-
-        Ok(Response::new(
-            &self,
-            match op {
-                Op::Open { path, flags } => {
-                    return Ok(Response::open_dup_like(
-                        &self,
-                        s.open(path, flags, &caller).await,
-                    ))
-                }
-                Op::Rmdir { path } => s.rmdir(path, &caller).await.map(|()| 0),
-                Op::Unlink { path } => s.unlink(path, &caller).await.map(|()| 0),
-
-                Op::Dup { old_fd, buf } => {
-                    return Ok(Response::open_dup_like(
-                        &self,
-                        s.dup(old_fd, buf, &caller).await,
-                    ))
-                }
-                Op::Read {
-                    fd,
-                    buf,
-                    offset,
-                    flags,
-                } => s.read(fd, buf, offset, flags, &caller).await,
-                Op::Write {
-                    fd,
-                    buf,
-                    offset,
-                    flags,
-                } => s.write(fd, buf, offset, flags, &caller).await,
-
-                // TODO: Don't convert to usize
-                Op::Fsize { fd } => s.fsize(fd, &caller).await.map(|l| l as usize),
-
-                Op::Fchmod { fd, new_mode } => s.fchmod(fd, new_mode, &caller).await.map(|()| 0),
-                Op::Fchown {
-                    fd,
-                    new_uid,
-                    new_gid,
-                } => s.fchown(fd, new_uid, new_gid, &caller).await.map(|()| 0),
-                Op::Fcntl { fd, cmd, arg } => s.fcntl(fd, cmd, arg, &caller).await,
-                Op::Fevent { fd, req_flags } => {
-                    s.fevent(fd, req_flags, &caller).await.map(|f| f.bits())
-                }
-                Op::Fpath { fd, buf } => s.fpath(fd, buf, &caller).await,
-                Op::Frename { fd, new_path } => s.frename(fd, new_path, &caller).await,
-                Op::Fstat { fd, stat } => s.fstat(fd, stat, &caller).await.map(|()| 0),
-                Op::FstatVfs { fd, stat } => s.fstatvfs(fd, stat, &caller).await.map(|()| 0),
-                Op::Fsync { fd } => s.fsync(fd, &caller).await.map(|()| 0),
-                Op::Ftruncate { fd, new_sz } => s.ftruncate(fd, new_sz, &caller).await.map(|()| 0),
-                Op::Futimens { fd, times } => s.futimens(fd, times, &caller).await.map(|()| 0),
-
-                Op::MmapPrep {
-                    fd,
-                    offset,
-                    len,
-                    flags,
-                } => s.mmap_prep(fd, offset, len, flags, &caller).await,
-                Op::Munmap {
-                    fd,
-                    offset,
-                    len,
-                    flags,
-                } => s.munmap(fd, offset, len, flags, &caller).await.map(|()| 0),
-
-                Op::Call {
-                    fd,
-                    payload,
-                    metadata,
-                } => s.call(fd, payload, metadata).await,
-
-                Op::Getdents {
-                    fd,
-                    buf,
-                    opaque_offset,
-                } => {
-                    let buf = s.getdents(fd, buf, opaque_offset).await?;
-                    Ok(buf.finalize())
-                }
-            },
-        ))
+        Ok(Response::new(self, res))
     }
     // TODO: Fix function coloring
     pub fn handle_sync(self, s: &mut impl SchemeSync) -> Result<Response> {
-        let sqe = &self.inner.sqe;
-
-        let caller = CallerCtx {
-            pid: sqe.caller as usize,
-            uid: sqe.args[5] as u32,
-            gid: (sqe.args[5] >> 32) as u32,
+        let caller = self.caller();
+        let Some(op) = self.op() else {
+            return Ok(Response::new(self, Err(Error::new(ENOSYS))));
         };
 
-        let Some(op) = (unsafe { Op::from_sqe_unchecked(sqe) }) else {
-            return Ok(Response::new(&self, Err(Error::new(ENOSYS))));
+        let res = match op {
+            Op::Open { path, flags } => {
+                let res = s.open(path, flags, &caller);
+                return Ok(Response::open_dup_like(self, res));
+            }
+            Op::Rmdir { path } => s.rmdir(path, &caller).map(|()| 0),
+            Op::Unlink { path } => s.unlink(path, &caller).map(|()| 0),
+
+            Op::Dup { old_fd, buf } => {
+                let res = s.dup(old_fd, buf, &caller);
+                return Ok(Response::open_dup_like(self, res));
+            }
+            Op::Read {
+                fd,
+                buf,
+                offset,
+                flags,
+            } => s.read(fd, buf, offset, flags, &caller),
+            Op::Write {
+                fd,
+                buf,
+                offset,
+                flags,
+            } => s.write(fd, buf, offset, flags, &caller),
+
+            // TODO: Don't convert to usize
+            Op::Fsize { fd } => s.fsize(fd, &caller).map(|l| l as usize),
+
+            Op::Fchmod { fd, new_mode } => s.fchmod(fd, new_mode, &caller).map(|()| 0),
+            Op::Fchown {
+                fd,
+                new_uid,
+                new_gid,
+            } => s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0),
+            Op::Fcntl { fd, cmd, arg } => s.fcntl(fd, cmd, arg, &caller),
+            Op::Fevent { fd, req_flags } => s.fevent(fd, req_flags, &caller).map(|f| f.bits()),
+            Op::Fpath { fd, buf } => s.fpath(fd, buf, &caller),
+            Op::Frename { fd, new_path } => s.frename(fd, new_path, &caller),
+            Op::Fstat { fd, stat } => s.fstat(fd, stat, &caller).map(|()| 0),
+            Op::FstatVfs { fd, stat } => s.fstatvfs(fd, stat, &caller).map(|()| 0),
+            Op::Fsync { fd } => s.fsync(fd, &caller).map(|()| 0),
+            Op::Ftruncate { fd, new_sz } => s.ftruncate(fd, new_sz, &caller).map(|()| 0),
+            Op::Futimens { fd, times } => s.futimens(fd, times, &caller).map(|()| 0),
+
+            Op::MmapPrep {
+                fd,
+                offset,
+                len,
+                flags,
+            } => s.mmap_prep(fd, offset, len, flags, &caller),
+            Op::Munmap {
+                fd,
+                offset,
+                len,
+                flags,
+            } => s.munmap(fd, offset, len, flags, &caller).map(|()| 0),
+            Op::Call {
+                fd,
+                payload,
+                metadata,
+            } => s.call(fd, payload, metadata),
+
+            Op::Getdents {
+                fd,
+                buf,
+                opaque_offset,
+            } => {
+                let buf = s.getdents(fd, buf, opaque_offset)?;
+                Ok(buf.finalize())
+            }
         };
-
-        Ok(Response::new(
-            &self,
-            match op {
-                Op::Open { path, flags } => {
-                    return Ok(Response::open_dup_like(&self, s.open(path, flags, &caller)))
-                }
-                Op::Rmdir { path } => s.rmdir(path, &caller).map(|()| 0),
-                Op::Unlink { path } => s.unlink(path, &caller).map(|()| 0),
-
-                Op::Dup { old_fd, buf } => {
-                    return Ok(Response::open_dup_like(&self, s.dup(old_fd, buf, &caller)))
-                }
-                Op::Read {
-                    fd,
-                    buf,
-                    offset,
-                    flags,
-                } => s.read(fd, buf, offset, flags, &caller),
-                Op::Write {
-                    fd,
-                    buf,
-                    offset,
-                    flags,
-                } => s.write(fd, buf, offset, flags, &caller),
-
-                // TODO: Don't convert to usize
-                Op::Fsize { fd } => s.fsize(fd, &caller).map(|l| l as usize),
-
-                Op::Fchmod { fd, new_mode } => s.fchmod(fd, new_mode, &caller).map(|()| 0),
-                Op::Fchown {
-                    fd,
-                    new_uid,
-                    new_gid,
-                } => s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0),
-                Op::Fcntl { fd, cmd, arg } => s.fcntl(fd, cmd, arg, &caller),
-                Op::Fevent { fd, req_flags } => s.fevent(fd, req_flags, &caller).map(|f| f.bits()),
-                Op::Fpath { fd, buf } => s.fpath(fd, buf, &caller),
-                Op::Frename { fd, new_path } => s.frename(fd, new_path, &caller),
-                Op::Fstat { fd, stat } => s.fstat(fd, stat, &caller).map(|()| 0),
-                Op::FstatVfs { fd, stat } => s.fstatvfs(fd, stat, &caller).map(|()| 0),
-                Op::Fsync { fd } => s.fsync(fd, &caller).map(|()| 0),
-                Op::Ftruncate { fd, new_sz } => s.ftruncate(fd, new_sz, &caller).map(|()| 0),
-                Op::Futimens { fd, times } => s.futimens(fd, times, &caller).map(|()| 0),
-
-                Op::MmapPrep {
-                    fd,
-                    offset,
-                    len,
-                    flags,
-                } => s.mmap_prep(fd, offset, len, flags, &caller),
-                Op::Munmap {
-                    fd,
-                    offset,
-                    len,
-                    flags,
-                } => s.munmap(fd, offset, len, flags, &caller).map(|()| 0),
-                Op::Call {
-                    fd,
-                    payload,
-                    metadata,
-                } => s.call(fd, payload, metadata),
-
-                Op::Getdents {
-                    fd,
-                    buf,
-                    opaque_offset,
-                } => {
-                    let buf = s.getdents(fd, buf, opaque_offset)?;
-                    Ok(buf.finalize())
-                }
-            },
-        ))
+        Ok(Response::new(self, res))
     }
 }
 

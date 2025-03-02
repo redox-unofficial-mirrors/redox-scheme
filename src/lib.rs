@@ -26,7 +26,7 @@ pub enum OpenResult {
 use core::mem::size_of;
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Request {
     sqe: Sqe,
 }
@@ -40,11 +40,13 @@ pub struct CancellationRequest {
 }
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct CallRequest {
     inner: Request,
 }
 
+#[repr(transparent)]
+#[derive(Debug)]
 pub struct SendFdRequest {
     inner: Request,
 }
@@ -61,15 +63,15 @@ pub enum RequestKind {
 
 impl CallRequest {
     #[inline]
-    pub fn request(&self) -> Request {
-        self.inner
+    pub fn request(&self) -> &Request {
+        &self.inner
     }
 }
 
 impl SendFdRequest {
     #[inline]
-    pub fn request(&self) -> Request {
-        self.inner
+    pub fn request(&self) -> &Request {
+        &self.inner
     }
 
     pub fn id(&self) -> usize {
@@ -173,7 +175,8 @@ impl Socket {
     pub fn next_request(&self, behavior: SignalBehavior) -> Result<Option<Request>> {
         let mut buf = [Request::default()];
         Ok(if self.read_requests(&mut buf, behavior)? > 0 {
-            Some(buf[0])
+            let [req] = buf;
+            Some(req)
         } else {
             None
         })
@@ -203,7 +206,7 @@ impl Socket {
 pub struct Response(Cqe);
 
 impl Response {
-    pub fn new(req: &CallRequest, status: Result<usize>) -> Self {
+    pub fn new(req: CallRequest, status: Result<usize>) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
@@ -211,16 +214,16 @@ impl Response {
             tag: req.inner.sqe.tag,
         })
     }
-    pub fn open_dup_like(req: &CallRequest, res: Result<OpenResult>) -> Response {
+    pub fn open_dup_like(req: CallRequest, res: Result<OpenResult>) -> Response {
         match res {
             Ok(OpenResult::ThisScheme { number, flags }) => {
-                Response::new(&req, Ok(number)).with_extra([flags.bits(), 0, 0])
+                Response::new(req, Ok(number)).with_extra([flags.bits(), 0, 0])
             }
-            Err(e) => Response::new(&req, Err(e)),
-            Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(&req, fd),
+            Err(e) => Response::new(req, Err(e)),
+            Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(req, fd),
         }
     }
-    pub fn return_external_fd(req: &CallRequest, fd: usize) -> Self {
+    pub fn return_external_fd(req: CallRequest, fd: usize) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondWithFd as u8,
             extra_raw: [0_u8; 3],
@@ -235,7 +238,7 @@ impl Response {
         })
     }
 
-    pub fn for_sendfd(req: &SendFdRequest, status: Result<usize>) -> Self {
+    pub fn for_sendfd(req: SendFdRequest, status: Result<usize>) -> Self {
         Self(Cqe {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
