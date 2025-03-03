@@ -50,7 +50,8 @@ impl Debug for OpCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpCall")
             .field("fd", &self.fd)
-            .field("payload", &self.payload) // too large, just debug pointer
+            // TODO: debug first and last few bytes, collapse middle to ...
+            .field("payload", &self.payload)
             .field("metadata", &self.metadata())
             .finish()
     }
