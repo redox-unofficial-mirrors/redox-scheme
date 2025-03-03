@@ -600,7 +600,7 @@ pub trait SchemeAsync {
 
     /* Resource operations */
     async fn dup(&mut self, old_id: usize, buf: &[u8], ctx: &CallerCtx) -> Result<OpenResult> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn read(
@@ -630,7 +630,7 @@ pub trait SchemeAsync {
     }
 
     async fn fchmod(&mut self, id: usize, new_mode: u16, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fchown(
@@ -640,11 +640,11 @@ pub trait SchemeAsync {
         new_gid: u32,
         ctx: &CallerCtx,
     ) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fcntl(&mut self, id: usize, cmd: usize, arg: usize, ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fevent(
@@ -657,19 +657,19 @@ pub trait SchemeAsync {
     }
 
     async fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn frename(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fstat(&mut self, id: usize, stat: &mut Stat, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fstatvfs(&mut self, id: usize, stat: &mut StatVfs, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn fsync(&mut self, id: usize, ctx: &CallerCtx) -> Result<()> {
@@ -694,7 +694,7 @@ pub trait SchemeAsync {
         buf: DirentBuf<&'buf mut [u8]>,
         opaque_offset: u64,
     ) -> Result<DirentBuf<&'buf mut [u8]>> {
-        Err(Error::new(EBADF))
+        Err(Error::new(ENOTDIR))
     }
 
     async fn mmap_prep(
@@ -735,9 +735,8 @@ pub trait SchemeSync {
     }
 
     /* Resource operations */
-
     fn dup(&mut self, old_id: usize, buf: &[u8], ctx: &CallerCtx) -> Result<OpenResult> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn read(
@@ -767,35 +766,46 @@ pub trait SchemeSync {
     }
 
     fn fchmod(&mut self, id: usize, new_mode: u16, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
-    fn fchown(&mut self, id: usize, new_uid: u32, new_gid: u32, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+    fn fchown(
+        &mut self,
+        id: usize,
+        new_uid: u32,
+        new_gid: u32,
+        ctx: &CallerCtx,
+    ) -> Result<()> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn fcntl(&mut self, id: usize, cmd: usize, arg: usize, ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
-    fn fevent(&mut self, id: usize, flags: EventFlags, ctx: &CallerCtx) -> Result<EventFlags> {
+    fn fevent(
+        &mut self,
+        id: usize,
+        flags: EventFlags,
+        ctx: &CallerCtx,
+    ) -> Result<EventFlags> {
         Ok(EventFlags::empty())
     }
 
     fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn frename(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn fstat(&mut self, id: usize, stat: &mut Stat, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn fstatvfs(&mut self, id: usize, stat: &mut StatVfs, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(EBADF))
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn fsync(&mut self, id: usize, ctx: &CallerCtx) -> Result<()> {
@@ -810,16 +820,17 @@ pub trait SchemeSync {
         Err(Error::new(EBADF))
     }
 
+    fn call(&mut self, id: usize, payload: &mut [u8], metadata: &[u64]) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     fn getdents<'buf>(
         &mut self,
         id: usize,
         buf: DirentBuf<&'buf mut [u8]>,
         opaque_offset: u64,
     ) -> Result<DirentBuf<&'buf mut [u8]>> {
-        Err(Error::new(EBADF))
-    }
-    fn call(&mut self, id: usize, payload: &mut [u8], metadata: &[u64]) -> Result<usize> {
-        Err(Error::new(EOPNOTSUPP))
+        Err(Error::new(ENOTDIR))
     }
 
     fn mmap_prep(
