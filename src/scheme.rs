@@ -361,18 +361,18 @@ impl CallRequest {
             None => Err(self),
         }
     }
-    pub async fn handle_async(self, s: &mut impl SchemeAsync) -> Result<Response> {
+    pub async fn handle_async(self, s: &mut impl SchemeAsync) -> Response {
         let caller = self.caller();
 
         let op = match self.op() {
             Ok(op) => op,
-            Err(this) => return Ok(Response::new(Err(Error::new(ENOSYS)), this)),
+            Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
         };
 
         let (res, tag) = match op {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller).await;
-                return Ok(Response::open_dup_like(res, req));
+                return Response::open_dup_like(res, req);
             }
             Op::Rmdir(req) => (
                 s.rmdir(req.path(), &caller).await.map(|()| 0),
@@ -385,7 +385,7 @@ impl CallRequest {
 
             Op::Dup(req) => {
                 let res = s.dup(req.fd, req.buf(), &caller).await;
-                return Ok(Response::open_dup_like(res, req));
+                return Response::open_dup_like(res, req);
             }
             Op::Read(mut req) => {
                 let OpRead {
@@ -469,34 +469,35 @@ impl CallRequest {
                 let OpGetdents {
                     fd, opaque_offset, ..
                 } = req;
-                let buf = s
-                    .getdents(fd, req.buf().ok_or(Error::new(EINVAL))?, opaque_offset)
-                    .await?;
-                (Ok(buf.finalize()), req.into_tag())
+                let Some(buf) = req.buf() else {
+                    return Response::err(EINVAL, req);
+                };
+                let buf_res = s.getdents(fd, buf, opaque_offset).await;
+                (buf_res.map(|b| b.finalize()), req.into_tag())
             }
         };
-        Ok(Response::new(res, tag))
+        Response::new(res, tag)
     }
     // TODO: Fix function coloring, this is just s/.await//g
-    pub fn handle_sync(self, s: &mut impl SchemeSync) -> Result<Response> {
+    pub fn handle_sync(self, s: &mut impl SchemeSync) -> Response {
         let caller = self.caller();
 
         let op = match self.op() {
             Ok(op) => op,
-            Err(this) => return Ok(Response::new(Err(Error::new(ENOSYS)), this)),
+            Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
         };
 
         let (res, tag) = match op {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller);
-                return Ok(Response::open_dup_like(res, req));
+                return Response::open_dup_like(res, req);
             }
             Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
             Op::Unlink(req) => (s.unlink(req.path(), &caller).map(|()| 0), req.into_tag()),
 
             Op::Dup(req) => {
                 let res = s.dup(req.fd, req.buf(), &caller);
-                return Ok(Response::open_dup_like(res, req));
+                return Response::open_dup_like(res, req);
             }
             Op::Read(mut req) => {
                 let OpRead {
@@ -570,11 +571,14 @@ impl CallRequest {
                 let OpGetdents {
                     fd, opaque_offset, ..
                 } = req;
-                let buf = s.getdents(fd, req.buf().ok_or(Error::new(EINVAL))?, opaque_offset)?;
-                (Ok(buf.finalize()), req.into_tag())
+                let Some(buf) = req.buf() else {
+                    return Response::err(EINVAL, req);
+                };
+                let buf_res = s.getdents(fd, buf, opaque_offset);
+                (buf_res.map(|b| b.finalize()), req.into_tag())
             }
         };
-        Ok(Response::new(res, tag))
+        Response::new(res, tag)
     }
 }
 
