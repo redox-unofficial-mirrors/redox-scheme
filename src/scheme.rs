@@ -27,6 +27,28 @@ impl<Flags: Debug> Debug for OpPathLike<Flags> {
             .finish()
     }
 }
+
+pub struct OpFdPathLike<Flags> {
+    pub fd: usize,
+    inner: OpPathLike<Flags>,
+}
+
+impl<F> OpFdPathLike<F> {
+    pub fn path(&self) -> &str {
+        self.inner.path()
+    }
+}
+
+impl<Flags: Debug> Debug for OpFdPathLike<Flags> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpFdPathLike")
+            .field("fd", &self.fd)
+            .field("path", &self.path())
+            .field("flags", &self.inner.flags)
+            .finish()
+    }
+}
+
 pub struct OpCall {
     req: Tag,
     pub fd: usize,
@@ -131,6 +153,7 @@ impl OpWrite {
 #[derive(Debug)]
 pub enum Op {
     Open(OpPathLike<usize>),
+    OpenAt(OpFdPathLike<usize>),
     Rmdir(OpPathLike<()>),
     Unlink(OpPathLike<()>),
     Dup(OpQueryWrite<[u8]>),
@@ -209,7 +232,7 @@ impl Op {
         let opcode = Opcode::try_from_raw(sqe.opcode)?;
         let args = sqe.args;
 
-        let [a, b, c, _d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
         use core::{slice, str};
 
         Some(match opcode {
@@ -217,6 +240,14 @@ impl Op {
                 req,
                 path: str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)),
                 flags: c,
+            }),
+            Opcode::OpenAt => Op::OpenAt(OpFdPathLike {
+                fd: a,
+                inner: OpPathLike {
+                    req,
+                    path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                    flags: d,
+                }
             }),
             Opcode::Rmdir => Op::Rmdir(OpPathLike {
                 req,
@@ -348,6 +379,7 @@ impl Op {
     pub fn file_id(&self) -> Option<usize> {
         Some(match self {
             Op::Open(_) | Op::Rmdir(_) | Op::Unlink(_) => return None,
+            Op::OpenAt(op) => op.fd,
             Op::Dup(op) => op.fd,
             Op::Read(op) => op.fd,
             Op::Write(op) => op.fd,
@@ -412,6 +444,10 @@ impl Op {
         let (res, tag) = match self {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller);
+                return Response::open_dup_like(res, req);
+            },
+            Op::OpenAt(req) => {
+                let res = s.openat(req.fd, req.path(), req.inner.flags, &caller);
                 return Response::open_dup_like(res, req);
             }
             Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
@@ -506,6 +542,10 @@ impl Op {
         let (res, tag) = match self {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller).await;
+                return Response::open_dup_like(res, req);
+            },
+            Op::OpenAt(req) => {
+                let res = s.openat(req.fd, req.path(), req.inner.flags, &caller).await;
                 return Response::open_dup_like(res, req);
             }
             Op::Rmdir(req) => (
@@ -619,6 +659,10 @@ pub trait SchemeAsync {
     /* Scheme operations */
     async fn open(&mut self, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
         Err(Error::new(ENOENT))
+    }
+
+    async fn openat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     async fn rmdir(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
@@ -755,6 +799,10 @@ pub trait SchemeSync {
     /* Scheme operations */
     fn open(&mut self, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
         Err(Error::new(ENOENT))
+    }
+
+    fn openat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn rmdir(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
@@ -944,11 +992,20 @@ impl<F> IntoTag for OpPathLike<F> {
         self.req.0
     }
 }
+impl<F> IntoTag for OpFdPathLike<F> {
+    fn into_tag(self) -> Tag {
+        self.inner.req
+    }
+    fn req_id(&self) -> Id {
+        self.inner.req.0
+    }
+}
 impl IntoTag for Op {
     fn into_tag(self) -> Tag {
         use Op::*;
         match self {
             Open(op) => op.into_tag(),
+            OpenAt(op) => op.into_tag(),
             Rmdir(op) | Self::Unlink(op) => op.into_tag(),
             Dup(op) => op.into_tag(),
             Read(op) => op.into_tag(),
@@ -975,6 +1032,7 @@ impl IntoTag for Op {
         use Op::*;
         match self {
             Open(op) => op.req_id(),
+            OpenAt(op) => op.req_id(),
             Rmdir(op) | Self::Unlink(op) => op.req_id(),
             Dup(op) => op.req_id(),
             Read(op) => op.req_id(),
