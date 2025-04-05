@@ -2,6 +2,7 @@
 
 extern crate alloc;
 use alloc::format;
+use alloc::vec::Vec;
 
 use core::str;
 use core::task::Poll;
@@ -24,7 +25,7 @@ pub enum OpenResult {
     OtherScheme { fd: usize },
 }
 
-use core::mem::size_of;
+use core::mem::{size_of, MaybeUninit};
 
 use self::scheme::IntoTag;
 
@@ -179,17 +180,23 @@ impl Socket {
     pub fn nonblock(name: impl AsRef<str>) -> Result<Self> {
         Self::create_inner(name.as_ref(), true)
     }
-    pub fn read_requests(&self, buf: &mut [Request], behavior: SignalBehavior) -> Result<usize> {
-        read_requests(self.inner.raw(), buf, behavior)
+    // TODO: trait RequestBuf?
+    pub fn read_requests(&self, buf: &mut Vec<Request>, behavior: SignalBehavior) -> Result<()> {
+        let num_read = read_requests(self.inner.raw(), buf.spare_capacity_mut(), behavior)?;
+        unsafe {
+            buf.set_len(buf.len() + num_read);
+        }
+        Ok(())
     }
     pub fn next_request(&self, behavior: SignalBehavior) -> Result<Option<Request>> {
-        let mut buf = [Request::default()];
-        Ok(if self.read_requests(&mut buf, behavior)? > 0 {
-            let [req] = buf;
-            Some(req)
-        } else {
-            None
-        })
+        let mut buf = MaybeUninit::uninit();
+        Ok(
+            if read_requests(self.inner.raw(), core::slice::from_mut(&mut buf), behavior)? > 0 {
+                Some(unsafe { buf.assume_init() })
+            } else {
+                None
+            },
+        )
     }
     pub fn write_responses(&self, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
         write_responses(self.inner.raw(), buf, behavior)
@@ -270,11 +277,10 @@ pub enum SignalBehavior {
     Restart,
 }
 
-// TODO: Support uninitialized memory
 #[inline]
 pub fn read_requests(
     socket: usize,
-    buf: &mut [Request],
+    buf: &mut [MaybeUninit<Request>],
     behavior: SignalBehavior,
 ) -> Result<usize> {
     let len = buf.len().checked_mul(size_of::<Request>()).unwrap();
