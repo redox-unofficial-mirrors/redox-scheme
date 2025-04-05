@@ -198,11 +198,19 @@ impl Socket {
             },
         )
     }
-    pub fn write_responses(&self, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
-        write_responses(self.inner.raw(), buf, behavior)
+    // TODO: trait ResponseBuf?
+    /*
+    pub fn write_responses(&self, buf: &mut VecDeque<Response>, behavior: SignalBehavior) -> Result<()> {
+        let n = unsafe { write_responses(self.inner.raw(), &*buf, behavior)? };
+        assert!(buf.len() >= n);
+        unsafe {
+            buf.set_len(buf.len() - n);
+        }
+        Ok(())
     }
+    */
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
-        Ok(self.write_responses(&[resp], behavior)? > 0)
+        Ok(unsafe { write_responses(self.inner.raw(), &[resp], behavior)? } > 0)
     }
     pub fn inner(&self) -> &libredox::Fd {
         &self.inner
@@ -277,6 +285,7 @@ pub enum SignalBehavior {
     Restart,
 }
 
+/// Read requests into a possibly uninitialized buffer.
 #[inline]
 pub fn read_requests(
     socket: usize,
@@ -303,8 +312,17 @@ pub fn read_requests(
     Ok(bytes_read / size_of::<Request>())
 }
 
+// Write responses to a raw socket
+//
+// SAFETY
+//
+// Every Response can only be written once, otherwise double frees can occur.
 #[inline]
-pub fn write_responses(socket: usize, buf: &[Response], behavior: SignalBehavior) -> Result<usize> {
+pub unsafe fn write_responses(
+    socket: usize,
+    buf: &[Response],
+    behavior: SignalBehavior,
+) -> Result<usize> {
     let bytes = unsafe {
         core::slice::from_raw_parts(
             buf.as_ptr().cast(),
