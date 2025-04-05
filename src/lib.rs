@@ -41,6 +41,12 @@ pub struct Id(u32);
 #[derive(Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
 pub struct Tag(Id);
 
+impl Tag {
+    pub fn id(&self) -> Id {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct CancellationRequest {
     pub id: Id,

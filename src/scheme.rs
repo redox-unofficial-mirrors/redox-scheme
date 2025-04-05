@@ -877,20 +877,30 @@ pub trait SchemeSync {
 }
 pub trait IntoTag {
     fn into_tag(self) -> Tag;
+    fn req_id(&self) -> Id;
 }
 impl IntoTag for Tag {
     fn into_tag(self) -> Tag {
         self
+    }
+    fn req_id(&self) -> Id {
+        self.0
     }
 }
 impl IntoTag for CallRequest {
     fn into_tag(self) -> Tag {
         Tag(self.request_id())
     }
+    fn req_id(&self) -> Id {
+        self.request_id()
+    }
 }
 impl IntoTag for SendFdRequest {
     fn into_tag(self) -> Tag {
         Tag(self.request_id())
+    }
+    fn req_id(&self) -> Id {
+        self.request_id()
     }
 }
 macro_rules! trivial_into {
@@ -901,6 +911,10 @@ macro_rules! trivial_into {
             fn into_tag(self) -> Tag {
                 self.req
             }
+            #[inline]
+            fn req_id(&self) -> Id {
+                self.req.req_id()
+            }
         }
         )*
     }
@@ -910,15 +924,24 @@ impl<T: ?Sized> IntoTag for OpQueryWrite<T> {
     fn into_tag(self) -> Tag {
         self.req
     }
+    fn req_id(&self) -> Id {
+        self.req.0
+    }
 }
 impl<T: ?Sized> IntoTag for OpQueryRead<T> {
     fn into_tag(self) -> Tag {
         self.req
     }
+    fn req_id(&self) -> Id {
+        self.req.0
+    }
 }
 impl<F> IntoTag for OpPathLike<F> {
     fn into_tag(self) -> Tag {
         self.req
+    }
+    fn req_id(&self) -> Id {
+        self.req.0
     }
 }
 impl IntoTag for Op {
@@ -946,6 +969,32 @@ impl IntoTag for Op {
             Futimens(op) => op.into_tag(),
             Call(op) => op.into_tag(),
             Getdents(op) => op.into_tag(),
+        }
+    }
+    fn req_id(&self) -> Id {
+        use Op::*;
+        match self {
+            Open(op) => op.req_id(),
+            Rmdir(op) | Self::Unlink(op) => op.req_id(),
+            Dup(op) => op.req_id(),
+            Read(op) => op.req_id(),
+            Write(op) => op.req_id(),
+            Fsize { req, .. }
+            | Fchmod { req, .. }
+            | Fchown { req, .. }
+            | Fcntl { req, .. }
+            | Fevent { req, .. }
+            | Fsync { req, .. }
+            | Ftruncate { req, .. }
+            | MmapPrep { req, .. }
+            | Munmap { req, .. } => req.req_id(),
+            Fpath(op) => op.req_id(),
+            Frename(op) => op.req_id(),
+            Fstat(op) => op.req_id(),
+            FstatVfs(op) => op.req_id(),
+            Futimens(op) => op.req_id(),
+            Call(op) => op.req_id(),
+            Getdents(op) => op.req_id(),
         }
     }
 }
