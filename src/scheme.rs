@@ -345,6 +345,30 @@ impl Op {
             _ => return None,
         })
     }
+    pub fn file_id(&self) -> Option<usize> {
+        Some(match self {
+            Op::Open(_) | Op::Rmdir(_) | Op::Unlink(_) => return None,
+            Op::Dup(op) => op.fd,
+            Op::Read(op) => op.fd,
+            Op::Write(op) => op.fd,
+            Op::Fsize { fd, .. }
+            | Op::Fchmod { fd, .. }
+            | Op::Fchown { fd, .. }
+            | Op::Fcntl { fd, .. }
+            | Op::Fevent { fd, .. }
+            | Op::Fsync { fd, .. }
+            | Op::Ftruncate { fd, .. }
+            | Op::MmapPrep { fd, .. }
+            | Op::Munmap { fd, .. } => *fd,
+            Op::Fpath(op) => op.fd,
+            Op::Frename(op) => op.fd,
+            Op::Fstat(op) => op.fd,
+            Op::FstatVfs(op) => op.fd,
+            Op::Futimens(op) => op.fd,
+            Op::Call(op) => op.fd,
+            Op::Getdents(op) => op.fd,
+        })
+    }
 }
 impl CallRequest {
     pub fn caller(&self) -> CallerCtx {
