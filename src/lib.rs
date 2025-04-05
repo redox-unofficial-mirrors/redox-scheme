@@ -197,15 +197,6 @@ impl Socket {
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
         Ok(self.write_responses(&[resp], behavior)? > 0)
     }
-    pub fn post_fevent(&self, id: usize, flags: usize) -> Result<()> {
-        self.inner.write(&Cqe {
-            flags: CqeOpcode::SendFevent as u8,
-            extra_raw: [0_u8; 3],
-            tag: flags as u32,
-            result: id as u64,
-        })?;
-        Ok(())
-    }
     pub fn inner(&self) -> &libredox::Fd {
         &self.inner
     }
@@ -262,6 +253,14 @@ impl Response {
         Self(Cqe {
             extra_raw: extra,
             ..self.0
+        })
+    }
+    pub fn post_fevent(id: usize, flags: usize) -> Self {
+        Self(Cqe {
+            flags: CqeOpcode::SendFevent as u8,
+            extra_raw: [0_u8; 3],
+            tag: flags as u32,
+            result: id as u64,
         })
     }
 }

@@ -769,13 +769,7 @@ pub trait SchemeSync {
         Err(Error::new(EOPNOTSUPP))
     }
 
-    fn fchown(
-        &mut self,
-        id: usize,
-        new_uid: u32,
-        new_gid: u32,
-        ctx: &CallerCtx,
-    ) -> Result<()> {
+    fn fchown(&mut self, id: usize, new_uid: u32, new_gid: u32, ctx: &CallerCtx) -> Result<()> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -783,12 +777,7 @@ pub trait SchemeSync {
         Err(Error::new(EOPNOTSUPP))
     }
 
-    fn fevent(
-        &mut self,
-        id: usize,
-        flags: EventFlags,
-        ctx: &CallerCtx,
-    ) -> Result<EventFlags> {
+    fn fevent(&mut self, id: usize, flags: EventFlags, ctx: &CallerCtx) -> Result<EventFlags> {
         Ok(EventFlags::empty())
     }
 
