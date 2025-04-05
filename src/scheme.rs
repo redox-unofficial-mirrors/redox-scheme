@@ -394,7 +394,116 @@ impl CallRequest {
             Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
         };
 
-        let (res, tag) = match op {
+        op.handle_async(caller, s).await
+    }
+    // TODO: Fix function coloring, this is just s/.await//g
+    pub fn handle_sync(self, s: &mut impl SchemeSync) -> Response {
+        let caller = self.caller();
+
+        let op = match self.op() {
+            Ok(op) => op,
+            Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
+        };
+        op.handle_sync(caller, s)
+    }
+}
+impl Op {
+    pub fn handle_sync(self, caller: CallerCtx, s: &mut impl SchemeSync) -> Response {
+        let (res, tag) = match self {
+            Op::Open(req) => {
+                let res = s.open(req.path(), req.flags, &caller);
+                return Response::open_dup_like(res, req);
+            }
+            Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
+            Op::Unlink(req) => (s.unlink(req.path(), &caller).map(|()| 0), req.into_tag()),
+
+            Op::Dup(req) => {
+                let res = s.dup(req.fd, req.buf(), &caller);
+                return Response::open_dup_like(res, req);
+            }
+            Op::Read(mut req) => {
+                let OpRead {
+                    fd, offset, flags, ..
+                } = req;
+                (
+                    s.read(fd, req.buf(), offset, flags, &caller),
+                    req.into_tag(),
+                )
+            }
+            Op::Write(req) => (
+                s.write(req.fd, req.buf(), req.offset, req.flags, &caller),
+                req.into_tag(),
+            ),
+
+            // TODO: Don't convert to usize
+            Op::Fsize { req, fd } => (s.fsize(fd, &caller).map(|l| l as usize), req),
+
+            Op::Fchmod { req, fd, new_mode } => (s.fchmod(fd, new_mode, &caller).map(|()| 0), req),
+            Op::Fchown {
+                req,
+                fd,
+                new_uid,
+                new_gid,
+            } => (s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0), req),
+            Op::Fcntl { req, fd, cmd, arg } => (s.fcntl(fd, cmd, arg, &caller), req),
+            Op::Fevent { req, fd, req_flags } => {
+                (s.fevent(fd, req_flags, &caller).map(|f| f.bits()), req)
+            }
+            Op::Fpath(mut req) => (s.fpath(req.fd, req.buf(), &caller), req.into_tag()),
+            Op::Frename(req) => (s.frename(req.fd, req.buf(), &caller), req.into_tag()),
+            Op::Fstat(mut req) => (
+                s.fstat(req.fd, req.buf(), &caller).map(|()| 0),
+                req.into_tag(),
+            ),
+            Op::FstatVfs(mut req) => (
+                s.fstatvfs(req.fd, req.buf(), &caller).map(|()| 0),
+                req.into_tag(),
+            ),
+            Op::Fsync { req, fd } => (s.fsync(fd, &caller).map(|()| 0), req),
+            Op::Ftruncate { req, fd, new_sz } => {
+                (s.ftruncate(fd, new_sz, &caller).map(|()| 0), req)
+            }
+            Op::Futimens(req) => (
+                s.futimens(req.fd, req.buf(), &caller).map(|()| 0),
+                req.into_tag(),
+            ),
+
+            Op::MmapPrep {
+                req,
+                fd,
+                offset,
+                len,
+                flags,
+            } => (s.mmap_prep(fd, offset, len, flags, &caller), req),
+            Op::Munmap {
+                req,
+                fd,
+                offset,
+                len,
+                flags,
+            } => (s.munmap(fd, offset, len, flags, &caller).map(|()| 0), req),
+
+            Op::Call(mut req) => {
+                let fd = req.fd;
+                let (payload, metadata) = req.payload_and_metadata();
+                (s.call(fd, payload, metadata), req.into_tag())
+            }
+
+            Op::Getdents(mut req) => {
+                let OpGetdents {
+                    fd, opaque_offset, ..
+                } = req;
+                let Some(buf) = req.buf() else {
+                    return Response::err(EINVAL, req);
+                };
+                let buf_res = s.getdents(fd, buf, opaque_offset);
+                (buf_res.map(|b| b.finalize()), req.into_tag())
+            }
+        };
+        Response::new(res, tag)
+    }
+    pub async fn handle_async(self, caller: CallerCtx, s: &mut impl SchemeAsync) -> Response {
+        let (res, tag) = match self {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller).await;
                 return Response::open_dup_like(res, req);
@@ -498,108 +607,6 @@ impl CallRequest {
                     return Response::err(EINVAL, req);
                 };
                 let buf_res = s.getdents(fd, buf, opaque_offset).await;
-                (buf_res.map(|b| b.finalize()), req.into_tag())
-            }
-        };
-        Response::new(res, tag)
-    }
-    // TODO: Fix function coloring, this is just s/.await//g
-    pub fn handle_sync(self, s: &mut impl SchemeSync) -> Response {
-        let caller = self.caller();
-
-        let op = match self.op() {
-            Ok(op) => op,
-            Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
-        };
-
-        let (res, tag) = match op {
-            Op::Open(req) => {
-                let res = s.open(req.path(), req.flags, &caller);
-                return Response::open_dup_like(res, req);
-            }
-            Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
-            Op::Unlink(req) => (s.unlink(req.path(), &caller).map(|()| 0), req.into_tag()),
-
-            Op::Dup(req) => {
-                let res = s.dup(req.fd, req.buf(), &caller);
-                return Response::open_dup_like(res, req);
-            }
-            Op::Read(mut req) => {
-                let OpRead {
-                    fd, offset, flags, ..
-                } = req;
-                (
-                    s.read(fd, req.buf(), offset, flags, &caller),
-                    req.into_tag(),
-                )
-            }
-            Op::Write(req) => (
-                s.write(req.fd, req.buf(), req.offset, req.flags, &caller),
-                req.into_tag(),
-            ),
-
-            // TODO: Don't convert to usize
-            Op::Fsize { req, fd } => (s.fsize(fd, &caller).map(|l| l as usize), req),
-
-            Op::Fchmod { req, fd, new_mode } => (s.fchmod(fd, new_mode, &caller).map(|()| 0), req),
-            Op::Fchown {
-                req,
-                fd,
-                new_uid,
-                new_gid,
-            } => (s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0), req),
-            Op::Fcntl { req, fd, cmd, arg } => (s.fcntl(fd, cmd, arg, &caller), req),
-            Op::Fevent { req, fd, req_flags } => {
-                (s.fevent(fd, req_flags, &caller).map(|f| f.bits()), req)
-            }
-            Op::Fpath(mut req) => (s.fpath(req.fd, req.buf(), &caller), req.into_tag()),
-            Op::Frename(req) => (s.frename(req.fd, req.buf(), &caller), req.into_tag()),
-            Op::Fstat(mut req) => (
-                s.fstat(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
-            Op::FstatVfs(mut req) => (
-                s.fstatvfs(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
-            Op::Fsync { req, fd } => (s.fsync(fd, &caller).map(|()| 0), req),
-            Op::Ftruncate { req, fd, new_sz } => {
-                (s.ftruncate(fd, new_sz, &caller).map(|()| 0), req)
-            }
-            Op::Futimens(req) => (
-                s.futimens(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
-
-            Op::MmapPrep {
-                req,
-                fd,
-                offset,
-                len,
-                flags,
-            } => (s.mmap_prep(fd, offset, len, flags, &caller), req),
-            Op::Munmap {
-                req,
-                fd,
-                offset,
-                len,
-                flags,
-            } => (s.munmap(fd, offset, len, flags, &caller).map(|()| 0), req),
-
-            Op::Call(mut req) => {
-                let fd = req.fd;
-                let (payload, metadata) = req.payload_and_metadata();
-                (s.call(fd, payload, metadata), req.into_tag())
-            }
-
-            Op::Getdents(mut req) => {
-                let OpGetdents {
-                    fd, opaque_offset, ..
-                } = req;
-                let Some(buf) = req.buf() else {
-                    return Response::err(EINVAL, req);
-                };
-                let buf_res = s.getdents(fd, buf, opaque_offset);
                 (buf_res.map(|b| b.finalize()), req.into_tag())
             }
         };
