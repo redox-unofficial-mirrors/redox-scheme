@@ -32,7 +32,7 @@ pub enum OpenResult {
 
 use core::mem::{size_of, MaybeUninit};
 
-use self::scheme::{IntoTag, SchemeSync};
+use self::scheme::IntoTag;
 
 #[repr(transparent)]
 #[derive(Debug, Default)]
