@@ -376,6 +376,14 @@ impl Op {
             _ => return None,
         })
     }
+    pub fn is_explicitly_nonblock(&self) -> bool {
+        let flags = match self {
+            Self::Read(r) => r.flags,
+            Self::Write(w) => w.flags,
+            _ => 0,
+        };
+        flags as usize & O_NONBLOCK != 0
+    }
     pub fn file_id(&self) -> Option<usize> {
         Some(match self {
             Op::Open(_) | Op::Rmdir(_) | Op::Unlink(_) => return None,

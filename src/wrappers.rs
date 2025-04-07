@@ -83,7 +83,7 @@ impl<'sock> ReadinessBased<'sock> {
                 }))
                 | SchemeResponse::Regular(Err(Error {
                     errno: errno::EWOULDBLOCK,
-                })) => {
+                })) if !op.is_explicitly_nonblock() => {
                     self.states.insert(caller.id, (caller, op));
                     continue;
                 }
@@ -121,7 +121,7 @@ impl<'sock> ReadinessBased<'sock> {
             }))
             | SchemeResponse::Regular(Err(Error {
                 errno: errno::EWOULDBLOCK,
-            })) => {
+            })) if !op.is_explicitly_nonblock() => {
                 return Ok(ControlFlow::Continue((caller, op)));
             }
             SchemeResponse::Regular(r) => Response::new(r, op),
@@ -162,7 +162,7 @@ impl<'sock> ReadinessBased<'sock> {
             .write_responses(&mut self.responses_to_write, SignalBehavior::Restart)
         {
             // TODO: write ECANCELED or similar for everything in self.states?
-            Ok(()) if self.responses_to_write.is_empty() => Ok(false), // EOF
+            //Ok(()) if !self.responses_to_write.is_empty() => Ok(false), // EOF, FIXME
             Ok(())
             | Err(Error {
                 errno: errno::EINTR | errno::EWOULDBLOCK,
