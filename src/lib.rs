@@ -18,6 +18,7 @@ pub struct CallerCtx {
     pub pid: usize,
     pub uid: u32,
     pub gid: u32,
+    pub id: Id,
 }
 
 pub enum OpenResult {

@@ -410,6 +410,7 @@ impl CallRequest {
             pid: sqe.caller as usize,
             uid: sqe.args[5] as u32,
             gid: (sqe.args[5] >> 32) as u32,
+            id: Id(sqe.tag),
         }
     }
     pub fn op(self) -> Result<Op, Self> {
