@@ -247,7 +247,7 @@ impl Op {
                     req,
                     path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
                     flags: d,
-                }
+                },
             }),
             Opcode::Rmdir => Op::Rmdir(OpPathLike {
                 req,
@@ -429,7 +429,6 @@ impl CallRequest {
 
         op.handle_async(caller, s).await
     }
-    // TODO: Fix function coloring, this is just s/.await//g
     pub fn handle_sync(self, s: &mut impl SchemeSync) -> Response {
         let caller = self.caller();
 
@@ -440,111 +439,117 @@ impl CallRequest {
         op.handle_sync(caller, s)
     }
 }
+pub enum SchemeResponse {
+    Regular(Result<usize>),
+    Opened(Result<OpenResult>),
+}
+impl From<Result<usize>> for SchemeResponse {
+    fn from(value: Result<usize>) -> Self {
+        Self::Regular(value)
+    }
+}
 impl Op {
-    pub fn handle_sync(self, caller: CallerCtx, s: &mut impl SchemeSync) -> Response {
-        let (res, tag) = match self {
-            Op::Open(req) => {
+    pub fn handle_sync(mut self, caller: CallerCtx, s: &mut impl SchemeSync) -> Response {
+        match self.handle_sync_dont_consume(&caller, s) {
+            SchemeResponse::Opened(open) => Response::open_dup_like(open, self),
+            SchemeResponse::Regular(reg) => Response::new(reg, self),
+        }
+    }
+    pub fn handle_sync_dont_consume(
+        &mut self,
+        caller: &CallerCtx,
+        s: &mut impl SchemeSync,
+    ) -> SchemeResponse {
+        match *self {
+            Op::Open(ref req) => {
                 let res = s.open(req.path(), req.flags, &caller);
-                return Response::open_dup_like(res, req);
-            },
-            Op::OpenAt(req) => {
+                return SchemeResponse::Opened(res);
+            }
+            Op::OpenAt(ref req) => {
                 let res = s.openat(req.fd, req.path(), req.inner.flags, &caller);
-                return Response::open_dup_like(res, req);
+                return SchemeResponse::Opened(res);
             }
-            Op::Rmdir(req) => (s.rmdir(req.path(), &caller).map(|()| 0), req.into_tag()),
-            Op::Unlink(req) => (s.unlink(req.path(), &caller).map(|()| 0), req.into_tag()),
+            Op::Rmdir(ref req) => s.rmdir(req.path(), &caller).map(|()| 0).into(),
+            Op::Unlink(ref req) => s.unlink(req.path(), &caller).map(|()| 0).into(),
 
-            Op::Dup(req) => {
+            Op::Dup(ref req) => {
                 let res = s.dup(req.fd, req.buf(), &caller);
-                return Response::open_dup_like(res, req);
+                return SchemeResponse::Opened(res);
             }
-            Op::Read(mut req) => {
+            Op::Read(ref mut req) => {
                 let OpRead {
                     fd, offset, flags, ..
-                } = req;
-                (
-                    s.read(fd, req.buf(), offset, flags, &caller),
-                    req.into_tag(),
-                )
+                } = *req;
+                s.read(fd, req.buf(), offset, flags, &caller).into()
             }
-            Op::Write(req) => (
-                s.write(req.fd, req.buf(), req.offset, req.flags, &caller),
-                req.into_tag(),
-            ),
+            Op::Write(ref req) => s
+                .write(req.fd, req.buf(), req.offset, req.flags, &caller)
+                .into(),
 
             // TODO: Don't convert to usize
-            Op::Fsize { req, fd } => (s.fsize(fd, &caller).map(|l| l as usize), req),
+            Op::Fsize { fd, .. } => s.fsize(fd, &caller).map(|l| l as usize).into(),
 
-            Op::Fchmod { req, fd, new_mode } => (s.fchmod(fd, new_mode, &caller).map(|()| 0), req),
+            Op::Fchmod { fd, new_mode, .. } => s.fchmod(fd, new_mode, &caller).map(|()| 0).into(),
             Op::Fchown {
-                req,
                 fd,
                 new_uid,
                 new_gid,
-            } => (s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0), req),
-            Op::Fcntl { req, fd, cmd, arg } => (s.fcntl(fd, cmd, arg, &caller), req),
-            Op::Fevent { req, fd, req_flags } => {
-                (s.fevent(fd, req_flags, &caller).map(|f| f.bits()), req)
+                ..
+            } => s.fchown(fd, new_uid, new_gid, &caller).map(|()| 0).into(),
+            Op::Fcntl { fd, cmd, arg, .. } => s.fcntl(fd, cmd, arg, &caller).into(),
+            Op::Fevent { fd, req_flags, .. } => {
+                s.fevent(fd, req_flags, &caller).map(|f| f.bits()).into()
             }
-            Op::Fpath(mut req) => (s.fpath(req.fd, req.buf(), &caller), req.into_tag()),
-            Op::Frename(req) => (s.frename(req.fd, req.buf(), &caller), req.into_tag()),
-            Op::Fstat(mut req) => (
-                s.fstat(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
-            Op::FstatVfs(mut req) => (
-                s.fstatvfs(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
-            Op::Fsync { req, fd } => (s.fsync(fd, &caller).map(|()| 0), req),
-            Op::Ftruncate { req, fd, new_sz } => {
-                (s.ftruncate(fd, new_sz, &caller).map(|()| 0), req)
-            }
-            Op::Futimens(req) => (
-                s.futimens(req.fd, req.buf(), &caller).map(|()| 0),
-                req.into_tag(),
-            ),
+            Op::Fpath(ref mut req) => s.fpath(req.fd, req.buf(), &caller).into(),
+            Op::Frename(ref req) => s.frename(req.fd, req.buf(), &caller).into(),
+            Op::Fstat(ref mut req) => s.fstat(req.fd, req.buf(), &caller).map(|()| 0).into(),
+            Op::FstatVfs(ref mut req) => s.fstatvfs(req.fd, req.buf(), &caller).map(|()| 0).into(),
+            Op::Fsync { fd, .. } => s.fsync(fd, &caller).map(|()| 0).into(),
+            Op::Ftruncate { fd, new_sz, .. } => s.ftruncate(fd, new_sz, &caller).map(|()| 0).into(),
+            Op::Futimens(ref req) => s.futimens(req.fd, req.buf(), &caller).map(|()| 0).into(),
 
             Op::MmapPrep {
-                req,
                 fd,
                 offset,
                 len,
                 flags,
-            } => (s.mmap_prep(fd, offset, len, flags, &caller), req),
+                ..
+            } => s.mmap_prep(fd, offset, len, flags, &caller).into(),
             Op::Munmap {
-                req,
                 fd,
                 offset,
                 len,
                 flags,
-            } => (s.munmap(fd, offset, len, flags, &caller).map(|()| 0), req),
+                ..
+            } => s.munmap(fd, offset, len, flags, &caller).map(|()| 0).into(),
 
-            Op::Call(mut req) => {
+            Op::Call(ref mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                (s.call(fd, payload, metadata), req.into_tag())
+                s.call(fd, payload, metadata).into()
             }
 
-            Op::Getdents(mut req) => {
+            Op::Getdents(ref mut req) => {
                 let OpGetdents {
                     fd, opaque_offset, ..
-                } = req;
+                } = *req;
                 let Some(buf) = req.buf() else {
-                    return Response::err(EINVAL, req);
+                    return Err(Error::new(EINVAL)).into();
                 };
                 let buf_res = s.getdents(fd, buf, opaque_offset);
-                (buf_res.map(|b| b.finalize()), req.into_tag())
+                buf_res.map(|b| b.finalize()).into()
             }
-        };
-        Response::new(res, tag)
+        }
     }
+    // XXX: Although this has not yet been benchmarked, it likely makes sense for the
+    // readiness-based (or non-blockable) and completion-based APIs to diverge, as it is imperative
+    // that futures stay small.
     pub async fn handle_async(self, caller: CallerCtx, s: &mut impl SchemeAsync) -> Response {
         let (res, tag) = match self {
             Op::Open(req) => {
                 let res = s.open(req.path(), req.flags, &caller).await;
                 return Response::open_dup_like(res, req);
-            },
+            }
             Op::OpenAt(req) => {
                 let res = s.openat(req.fd, req.path(), req.inner.flags, &caller).await;
                 return Response::open_dup_like(res, req);
@@ -662,7 +667,13 @@ pub trait SchemeAsync {
         Err(Error::new(ENOENT))
     }
 
-    async fn openat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
+    async fn openat(
+        &mut self,
+        fd: usize,
+        path: &str,
+        flags: usize,
+        ctx: &CallerCtx,
+    ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -802,7 +813,13 @@ pub trait SchemeSync {
         Err(Error::new(ENOENT))
     }
 
-    fn openat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
+    fn openat(
+        &mut self,
+        fd: usize,
+        path: &str,
+        flags: usize,
+        ctx: &CallerCtx,
+    ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -923,6 +940,8 @@ pub trait SchemeSync {
     ) -> Result<()> {
         Err(Error::new(EOPNOTSUPP))
     }
+
+    fn on_close(&mut self, id: usize) {}
 }
 pub trait IntoTag {
     fn into_tag(self) -> Tag;

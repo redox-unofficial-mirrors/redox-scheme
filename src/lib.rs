@@ -1,6 +1,7 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -13,6 +14,9 @@ use syscall::flag::{FobtainFdFlags, SendFdFlags};
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
 pub mod scheme;
+
+#[cfg(feature = "std")]
+pub mod wrappers;
 
 pub struct CallerCtx {
     pub pid: usize,
@@ -28,7 +32,7 @@ pub enum OpenResult {
 
 use core::mem::{size_of, MaybeUninit};
 
-use self::scheme::IntoTag;
+use self::scheme::{IntoTag, SchemeSync};
 
 #[repr(transparent)]
 #[derive(Debug, Default)]
@@ -206,16 +210,20 @@ impl Socket {
         )
     }
     // TODO: trait ResponseBuf?
-    /*
-    pub fn write_responses(&self, buf: &mut VecDeque<Response>, behavior: SignalBehavior) -> Result<()> {
-        let n = unsafe { write_responses(self.inner.raw(), &*buf, behavior)? };
+    pub fn write_responses(
+        &self,
+        buf: &mut VecDeque<Response>,
+        behavior: SignalBehavior,
+    ) -> Result<()> {
+        let (slice, _) = buf.as_slices();
+
+        // NOTE: error only allowed to occur if nothing was written
+        let n = unsafe { write_responses(self.inner.raw(), slice, behavior)? };
         assert!(buf.len() >= n);
-        unsafe {
-            buf.set_len(buf.len() - n);
-        }
+        buf.drain(..n).for_each(core::mem::forget);
+
         Ok(())
     }
-    */
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
         Ok(unsafe { write_responses(self.inner.raw(), &[resp], behavior)? } > 0)
     }
