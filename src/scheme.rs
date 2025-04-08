@@ -30,6 +30,7 @@ impl<Flags: Debug> Debug for OpPathLike<Flags> {
 
 pub struct OpFdPathLike<Flags> {
     pub fd: usize,
+    pub fcntl_flags: u32,
     inner: OpPathLike<Flags>,
 }
 
@@ -45,6 +46,7 @@ impl<Flags: Debug> Debug for OpFdPathLike<Flags> {
             .field("fd", &self.fd)
             .field("path", &self.path())
             .field("flags", &self.inner.flags)
+            .field("fcntl_flags", &self.fcntl_flags)
             .finish()
     }
 }
@@ -232,7 +234,7 @@ impl Op {
         let opcode = Opcode::try_from_raw(sqe.opcode)?;
         let args = sqe.args;
 
-        let [a, b, c, d, _e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, e, _f] = args.map(|a| a as usize);
         use core::{slice, str};
 
         Some(match opcode {
@@ -243,6 +245,7 @@ impl Op {
             }),
             Opcode::OpenAt => Op::OpenAt(OpFdPathLike {
                 fd: a,
+                fcntl_flags: e as u32,
                 inner: OpPathLike {
                     req,
                     path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
@@ -474,7 +477,13 @@ impl Op {
                 return SchemeResponse::Opened(res);
             }
             Op::OpenAt(ref req) => {
-                let res = s.openat(req.fd, req.path(), req.inner.flags, &caller);
+                let res = s.openat(
+                    req.fd,
+                    req.path(),
+                    req.inner.flags,
+                    req.fcntl_flags,
+                    &caller,
+                );
                 return SchemeResponse::Opened(res);
             }
             Op::Rmdir(ref req) => s.rmdir(req.path(), &caller).map(|()| 0).into(),
@@ -559,7 +568,15 @@ impl Op {
                 return Response::open_dup_like(res, req);
             }
             Op::OpenAt(req) => {
-                let res = s.openat(req.fd, req.path(), req.inner.flags, &caller).await;
+                let res = s
+                    .openat(
+                        req.fd,
+                        req.path(),
+                        req.inner.flags,
+                        req.fcntl_flags,
+                        &caller,
+                    )
+                    .await;
                 return Response::open_dup_like(res, req);
             }
             Op::Rmdir(req) => (
@@ -680,6 +697,7 @@ pub trait SchemeAsync {
         fd: usize,
         path: &str,
         flags: usize,
+        fcntl_flags: u32,
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
@@ -826,6 +844,7 @@ pub trait SchemeSync {
         fd: usize,
         path: &str,
         flags: usize,
+        fcntl_flags: u32,
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
