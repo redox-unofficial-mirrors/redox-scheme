@@ -383,6 +383,7 @@ impl Op {
         let flags = match self {
             Self::Read(r) => r.flags,
             Self::Write(w) => w.flags,
+            Self::OpenAt(o) => o.fcntl_flags,
             _ => 0,
         };
         flags as usize & O_NONBLOCK != 0
