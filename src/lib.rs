@@ -107,6 +107,9 @@ impl SendFdRequest {
     pub fn flags(&self) -> SendFdFlags {
         SendFdFlags::from_bits_retain(self.inner.sqe.args[1] as usize)
     }
+    pub fn arg(&self) -> u64 {
+        self.inner.sqe.args[2]
+    }
 
     pub fn obtain_fd(
         &self,
