@@ -187,6 +187,7 @@ pub enum Op {
         fd: usize,
         req_flags: EventFlags,
     },
+    Flink(OpQueryWrite<str>),
     Fpath(OpQueryRead<[u8]>),
     Frename(OpQueryWrite<str>),
     Fstat(OpQueryRead<Stat>),
@@ -306,6 +307,11 @@ impl Op {
                 fd: a,
                 req_flags: EventFlags::from_bits_retain(b),
             },
+            Opcode::Flink => Op::Flink(OpQueryWrite {
+                req,
+                fd: a,
+                buf: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+            }),
             Opcode::Fpath => Op::Fpath(OpQueryRead {
                 req,
                 fd: a,
@@ -404,6 +410,7 @@ impl Op {
             | Op::Ftruncate { fd, .. }
             | Op::MmapPrep { fd, .. }
             | Op::Munmap { fd, .. } => *fd,
+            Op::Flink(op) => op.fd,
             Op::Fpath(op) => op.fd,
             Op::Frename(op) => op.fd,
             Op::Fstat(op) => op.fd,
@@ -518,6 +525,7 @@ impl Op {
             Op::Fevent { fd, req_flags, .. } => {
                 s.fevent(fd, req_flags, &caller).map(|f| f.bits()).into()
             }
+            Op::Flink(ref req) => s.flink(req.fd, req.buf(), &caller).into(),
             Op::Fpath(ref mut req) => s.fpath(req.fd, req.buf(), &caller).into(),
             Op::Frename(ref req) => s.frename(req.fd, req.buf(), &caller).into(),
             Op::Fstat(ref mut req) => s.fstat(req.fd, req.buf(), &caller).map(|()| 0).into(),
@@ -628,6 +636,7 @@ impl Op {
                 s.fevent(fd, req_flags, &caller).await.map(|f| f.bits()),
                 req,
             ),
+            Op::Flink(req) => (s.flink(req.fd, req.buf(), &caller).await, req.into_tag()),
             Op::Fpath(mut req) => (s.fpath(req.fd, req.buf(), &caller).await, req.into_tag()),
             Op::Frename(req) => (s.frename(req.fd, req.buf(), &caller).await, req.into_tag()),
             Op::Fstat(mut req) => (
@@ -770,6 +779,10 @@ pub trait SchemeAsync {
         Ok(EventFlags::empty())
     }
 
+    async fn flink(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     async fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
@@ -904,6 +917,10 @@ pub trait SchemeSync {
 
     fn fevent(&mut self, id: usize, flags: EventFlags, ctx: &CallerCtx) -> Result<EventFlags> {
         Ok(EventFlags::empty())
+    }
+
+    fn flink(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
@@ -1067,6 +1084,7 @@ impl IntoTag for Op {
             | Ftruncate { req, .. }
             | MmapPrep { req, .. }
             | Munmap { req, .. } => req,
+            Flink(op) => op.into_tag(),
             Fpath(op) => op.into_tag(),
             Frename(op) => op.into_tag(),
             Fstat(op) => op.into_tag(),
@@ -1094,6 +1112,7 @@ impl IntoTag for Op {
             | Ftruncate { req, .. }
             | MmapPrep { req, .. }
             | Munmap { req, .. } => req.req_id(),
+            Flink(op) => op.req_id(),
             Fpath(op) => op.req_id(),
             Frename(op) => op.req_id(),
             Fstat(op) => op.req_id(),
