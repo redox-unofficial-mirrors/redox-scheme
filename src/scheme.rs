@@ -54,20 +54,19 @@ impl<Flags: Debug> Debug for OpFdPathLike<Flags> {
 pub struct OpCall {
     req: Tag,
     pub fd: usize,
-    payload: *mut [u8],     // &req
-    metadata: *const [u64], // &req
+    payload: *mut [u8], // &req
+    metadata: [u64; 3],
 }
 impl OpCall {
     pub fn payload_and_metadata(&mut self) -> (&mut [u8], &[u64]) {
         // SAFETY: borrows &self.req
-        unsafe { (&mut *self.payload, &*self.metadata) }
+        unsafe { (&mut *self.payload, &self.metadata) }
     }
     pub fn payload(&mut self) -> &mut [u8] {
         self.payload_and_metadata().0
     }
     pub fn metadata(&self) -> &[u64] {
-        // SAFETY: borrows &self.req
-        unsafe { &*self.metadata }
+        &self.metadata
     }
 }
 impl Debug for OpCall {
@@ -357,7 +356,7 @@ impl Op {
                 req,
                 fd: a,
                 payload: slice::from_raw_parts_mut(b as *mut u8, c),
-                metadata: &sqe.args[3..],
+                metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
             }),
             Opcode::Getdents => Op::Getdents(OpGetdents {
                 req,
@@ -390,6 +389,7 @@ impl Op {
             Self::Read(r) => r.flags,
             Self::Write(w) => w.flags,
             Self::OpenAt(o) => o.fcntl_flags,
+            Self::Open(o) => o.flags as u32,
             _ => 0,
         };
         flags as usize & O_NONBLOCK != 0
@@ -458,6 +458,20 @@ impl CallRequest {
         op.handle_sync(caller, s)
     }
 }
+
+impl SendFdRequest {
+    pub fn caller(&self) -> CallerCtx {
+        let sqe = &self.inner.sqe;
+
+        CallerCtx {
+            pid: sqe.caller as usize,
+            uid: sqe.args[5] as u32,
+            gid: (sqe.args[5] >> 32) as u32,
+            id: self.request_id(),
+        }
+    }
+}
+
 pub enum SchemeResponse {
     Regular(Result<usize>),
     Opened(Result<OpenResult>),
@@ -552,7 +566,7 @@ impl Op {
             Op::Call(ref mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                s.call(fd, payload, metadata).into()
+                s.call(fd, payload, metadata, &caller).into()
             }
 
             Op::Getdents(ref mut req) => {
@@ -677,7 +691,7 @@ impl Op {
             Op::Call(mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                (s.call(fd, payload, metadata).await, req.into_tag())
+                (s.call(fd, payload, metadata, &caller).await, req.into_tag())
             }
 
             Op::Getdents(mut req) => {
@@ -811,7 +825,13 @@ pub trait SchemeAsync {
         Err(Error::new(EBADF))
     }
 
-    async fn call(&mut self, id: usize, payload: &mut [u8], metadata: &[u64]) -> Result<usize> {
+    async fn call(
+        &mut self,
+        id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -951,7 +971,13 @@ pub trait SchemeSync {
         Err(Error::new(EBADF))
     }
 
-    fn call(&mut self, id: usize, payload: &mut [u8], metadata: &[u64]) -> Result<usize> {
+    fn call(
+        &mut self,
+        id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -987,6 +1013,10 @@ pub trait SchemeSync {
     }
 
     fn on_close(&mut self, id: usize) {}
+
+    fn on_sendfd(&mut self, sendfd_request: &SendFdRequest) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
 }
 pub trait IntoTag {
     fn into_tag(self) -> Tag;

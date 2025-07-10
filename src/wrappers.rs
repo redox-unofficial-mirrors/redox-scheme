@@ -67,6 +67,12 @@ impl<'sock> ReadinessBased<'sock> {
                     acquire_scheme().on_close(id);
                     continue;
                 }
+                RequestKind::SendFd(sendfd_request) => {
+                    let result: Result<usize, Error> = acquire_scheme().on_sendfd(&sendfd_request);
+                    let response = Response::new(result, sendfd_request);
+                    self.responses_to_write.push_back(response);
+                    continue;
+                }
                 _ => continue,
             };
             let caller = req.caller();

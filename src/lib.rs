@@ -9,7 +9,7 @@ use core::str;
 use core::task::Poll;
 
 use libredox::flag;
-use syscall::error::{Error, Result, EINTR};
+use syscall::error::{Error, Result, EINTR, EWOULDBLOCK};
 use syscall::flag::{FobtainFdFlags, SendFdFlags};
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
@@ -28,6 +28,7 @@ pub struct CallerCtx {
 pub enum OpenResult {
     ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
+    WouldBlock,
 }
 
 use core::mem::{size_of, MaybeUninit};
@@ -272,6 +273,7 @@ impl Response {
             }
             Err(e) => Response::new(Err(e), req),
             Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(fd, req),
+            Ok(OpenResult::WouldBlock) => Response::new(Err(Error::new(EWOULDBLOCK)), req),
         }
     }
     pub fn return_external_fd(fd: usize, req: impl IntoTag) -> Self {
