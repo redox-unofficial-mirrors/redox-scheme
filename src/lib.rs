@@ -5,12 +5,15 @@ use alloc::collections::vec_deque::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 
+use core::mem;
 use core::str;
 use core::task::Poll;
 
 use libredox::flag;
 use syscall::error::{Error, Result, EINTR, EWOULDBLOCK};
-use syscall::flag::{FobtainFdFlags, SendFdFlags};
+use syscall::flag::{
+    CallFlags, FmoveFdFlags, FobtainFdFlags, RecvFdFlags, SchemeSocketCall, SendFdFlags,
+};
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
 pub mod scheme;
@@ -28,6 +31,7 @@ pub struct CallerCtx {
 pub enum OpenResult {
     ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
+    OtherSchemeMultiple { num_fds: usize },
     WouldBlock,
 }
 
@@ -70,10 +74,17 @@ pub struct SendFdRequest {
     inner: Request,
 }
 
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct RecvFdRequest {
+    inner: Request,
+}
+
 pub enum RequestKind {
     Call(CallRequest),
     Cancellation(CancellationRequest),
     SendFd(SendFdRequest),
+    RecvFd(RecvFdRequest),
     MsyncMsg,
     MunmapMsg,
     MmapMsg,
@@ -112,33 +123,83 @@ impl SendFdRequest {
         self.inner.sqe.args[2]
     }
 
+    pub fn num_fds(&self) -> usize {
+        self.inner.sqe.args[3] as usize
+    }
+
     pub fn obtain_fd(
         &self,
         socket: &Socket,
         flags: FobtainFdFlags,
-        dst_fd_or_ptr: Result<usize, &mut usize>,
+        dst_fds: &mut [usize],
     ) -> Result<()> {
         assert!(!flags.contains(FobtainFdFlags::MANUAL_FD));
-        match dst_fd_or_ptr {
-            Ok(dst_fd) => {
-                socket.inner.write(&Cqe {
-                    flags: CqeOpcode::ObtainFd as u8,
-                    extra_raw: usize::to_ne_bytes((flags | FobtainFdFlags::MANUAL_FD).bits())[..3]
-                        .try_into()
-                        .unwrap(),
-                    tag: self.request_id().0,
-                    result: dst_fd as u64,
-                })?;
-            }
-            Err(ptr) => {
-                socket.inner.write(&Cqe {
-                    flags: CqeOpcode::ObtainFd as u8,
-                    extra_raw: usize::to_ne_bytes(flags.bits())[..3].try_into().unwrap(),
-                    tag: self.request_id().0,
-                    result: ptr as *mut usize as u64,
-                })?;
-            }
+
+        let request_id = self.request_id().0;
+        let metadata: [u64; 2] = [SchemeSocketCall::ObtainFd as u64, request_id as u64];
+
+        let mut call_flags = CallFlags::FD;
+        if flags.contains(FobtainFdFlags::EXCLUSIVE) {
+            call_flags |= CallFlags::FD_EXCLUSIVE;
         }
+        if flags.contains(FobtainFdFlags::UPPER_TBL) {
+            call_flags |= CallFlags::FD_UPPER;
+        }
+
+        let dst_fds_bytes: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(
+                dst_fds.as_mut_ptr() as *mut u8,
+                dst_fds.len() * mem::size_of::<usize>(),
+            )
+        };
+
+        socket.inner.call_ro(dst_fds_bytes, call_flags, &metadata)?;
+
+        Ok(())
+    }
+}
+
+impl RecvFdRequest {
+    #[inline]
+    pub fn request(&self) -> &Request {
+        &self.inner
+    }
+    #[inline]
+    pub fn request_id(&self) -> Id {
+        Id(self.inner.sqe.tag)
+    }
+
+    pub fn id(&self) -> usize {
+        self.inner.sqe.args[0] as usize
+    }
+
+    pub fn flags(&self) -> RecvFdFlags {
+        RecvFdFlags::from_bits_retain(self.inner.sqe.args[1] as usize)
+    }
+    pub fn num_fds(&self) -> usize {
+        self.inner.sqe.args[2] as usize
+    }
+
+    pub fn move_fd(&self, socket: &Socket, flags: FmoveFdFlags, fds: &[usize]) -> Result<()> {
+        let metadata: [u64; 2] = [SchemeSocketCall::MoveFd as u64, self.request_id().0 as u64];
+
+        let fds_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                fds.as_ptr() as *mut u8,
+                fds.len() * mem::size_of::<usize>(),
+            )
+        };
+
+        let mut call_flags = CallFlags::FD;
+        if flags.contains(FmoveFdFlags::EXCLUSIVE) {
+            call_flags |= CallFlags::FD_EXCLUSIVE;
+        }
+        if flags.contains(FmoveFdFlags::CLONE) {
+            call_flags |= CallFlags::FD_CLONE;
+        }
+
+        socket.inner.call_wo(fds_bytes, call_flags, &metadata)?;
+
         Ok(())
     }
 }
@@ -154,6 +215,9 @@ impl Request {
                 id: Id(self.sqe.tag),
             }),
             Some(Opcode::Sendfd) => RequestKind::SendFd(SendFdRequest {
+                inner: Request { sqe: self.sqe },
+            }),
+            Some(Opcode::Recvfd) => RequestKind::RecvFd(RecvFdRequest {
                 inner: Request { sqe: self.sqe },
             }),
             Some(Opcode::Msync) => RequestKind::MsyncMsg,
@@ -273,6 +337,9 @@ impl Response {
             }
             Err(e) => Response::new(Err(e), req),
             Ok(OpenResult::OtherScheme { fd }) => Response::return_external_fd(fd, req),
+            Ok(OpenResult::OtherSchemeMultiple { num_fds }) => {
+                Response::return_external_multiple_fds(num_fds, req)
+            }
             Ok(OpenResult::WouldBlock) => Response::new(Err(Error::new(EWOULDBLOCK)), req),
         }
     }
@@ -281,6 +348,14 @@ impl Response {
             flags: CqeOpcode::RespondWithFd as u8,
             extra_raw: [0_u8; 3],
             result: fd as u64,
+            tag: req.into_tag().0 .0,
+        })
+    }
+    pub fn return_external_multiple_fds(num_fds: usize, req: impl IntoTag) -> Self {
+        Self(Cqe {
+            flags: CqeOpcode::RespondWithMultipleFds as u8,
+            extra_raw: [0_u8; 3],
+            result: num_fds as u64,
             tag: req.into_tag().0 .0,
         })
     }

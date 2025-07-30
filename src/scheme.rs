@@ -6,7 +6,9 @@ use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
 
-use crate::{CallRequest, CallerCtx, Id, OpenResult, Response, SendFdRequest, Tag};
+use crate::{
+    CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Request, Response, SendFdRequest, Tag,
+};
 
 pub struct OpPathLike<Flags> {
     req: Tag,
@@ -220,6 +222,8 @@ pub enum Op {
     Call(OpCall),
 
     Getdents(OpGetdents),
+
+    Recvfd(RecvFdRequest),
 }
 
 impl Op {
@@ -418,6 +422,7 @@ impl Op {
             Op::Futimens(op) => op.fd,
             Op::Call(op) => op.fd,
             Op::Getdents(op) => op.fd,
+            Op::Recvfd(req) => req.id(),
         })
     }
 }
@@ -460,6 +465,22 @@ impl CallRequest {
 }
 
 impl SendFdRequest {
+    pub fn caller(&self) -> CallerCtx {
+        let sqe = &self.inner.sqe;
+
+        CallerCtx {
+            pid: sqe.caller as usize,
+            uid: sqe.args[5] as u32,
+            gid: (sqe.args[5] >> 32) as u32,
+            id: self.request_id(),
+        }
+    }
+}
+
+impl RecvFdRequest {
+    pub fn op(self) -> Op {
+        Op::Recvfd(self)
+    }
     pub fn caller(&self) -> CallerCtx {
         let sqe = &self.inner.sqe;
 
@@ -578,6 +599,10 @@ impl Op {
                 };
                 let buf_res = s.getdents(fd, buf, opaque_offset);
                 buf_res.map(|b| b.finalize()).into()
+            }
+            Op::Recvfd(ref req) => {
+                let res = s.on_recvfd(req);
+                return SchemeResponse::Opened(res);
             }
         }
     }
@@ -703,6 +728,10 @@ impl Op {
                 };
                 let buf_res = s.getdents(fd, buf, opaque_offset).await;
                 (buf_res.map(|b| b.finalize()), req.into_tag())
+            }
+            Op::Recvfd(req) => {
+                let res = s.on_recvfd(&req).await;
+                return Response::open_dup_like(res, req);
             }
         };
         Response::new(res, tag)
@@ -865,6 +894,10 @@ pub trait SchemeAsync {
     ) -> Result<()> {
         Err(Error::new(EOPNOTSUPP))
     }
+
+    async fn on_recvfd(&mut self, recvfd_request: &RecvFdRequest) -> Result<OpenResult> {
+        Err(Error::new(EOPNOTSUPP))
+    }
 }
 #[allow(unused_variables)]
 pub trait SchemeSync {
@@ -1017,6 +1050,9 @@ pub trait SchemeSync {
     fn on_sendfd(&mut self, sendfd_request: &SendFdRequest) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
+    fn on_recvfd(&mut self, recvfd_request: &RecvFdRequest) -> Result<OpenResult> {
+        Err(Error::new(EOPNOTSUPP))
+    }
 }
 pub trait IntoTag {
     fn into_tag(self) -> Tag;
@@ -1039,6 +1075,14 @@ impl IntoTag for CallRequest {
     }
 }
 impl IntoTag for SendFdRequest {
+    fn into_tag(self) -> Tag {
+        Tag(self.request_id())
+    }
+    fn req_id(&self) -> Id {
+        self.request_id()
+    }
+}
+impl IntoTag for RecvFdRequest {
     fn into_tag(self) -> Tag {
         Tag(self.request_id())
     }
@@ -1122,6 +1166,7 @@ impl IntoTag for Op {
             Futimens(op) => op.into_tag(),
             Call(op) => op.into_tag(),
             Getdents(op) => op.into_tag(),
+            Recvfd(req) => req.into_tag(),
         }
     }
     fn req_id(&self) -> Id {
@@ -1150,6 +1195,7 @@ impl IntoTag for Op {
             Futimens(op) => op.req_id(),
             Call(op) => op.req_id(),
             Getdents(op) => op.req_id(),
+            Recvfd(req) => req.req_id(),
         }
     }
 }

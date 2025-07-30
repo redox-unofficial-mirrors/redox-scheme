@@ -4,8 +4,8 @@ use std::ops::ControlFlow;
 
 use libredox::error::Error as LError;
 
-use syscall::error::{self as errno, ECANCELED, EIO, EOPNOTSUPP};
-use syscall::{Error, Result};
+use syscall::error::{self as errno, Error, ECANCELED, EIO, EOPNOTSUPP};
+use syscall::Result;
 
 use crate::scheme::{Op, SchemeResponse, SchemeSync};
 use crate::{CallerCtx, Id, Request, RequestKind, Response, SignalBehavior, Socket};
@@ -68,8 +68,23 @@ impl<'sock> ReadinessBased<'sock> {
                     continue;
                 }
                 RequestKind::SendFd(sendfd_request) => {
-                    let result: Result<usize, Error> = acquire_scheme().on_sendfd(&sendfd_request);
+                    let result = acquire_scheme().on_sendfd(&sendfd_request);
                     let response = Response::new(result, sendfd_request);
+                    self.responses_to_write.push_back(response);
+                    continue;
+                }
+                RequestKind::RecvFd(recvfd_request) => {
+                    let result = acquire_scheme().on_recvfd(&recvfd_request);
+                    let caller = recvfd_request.caller();
+
+                    if let Err(Error {
+                        errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                    }) = result
+                    {
+                        self.states.insert(caller.id, (caller, recvfd_request.op()));
+                        continue;
+                    }
+                    let response = Response::open_dup_like(result, recvfd_request);
                     self.responses_to_write.push_back(response);
                     continue;
                 }
