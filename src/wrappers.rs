@@ -41,7 +41,7 @@ impl<'sock> ReadinessBased<'sock> {
             Ok(()) if self.requests_read.is_empty() => Ok(false), // EOF
             Ok(())
             | Err(Error {
-                errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
+                errno: errno::EINTR | errno::EWOULDBLOCK,
             }) => Ok(true),
             Err(err) => return Err(err),
         }
@@ -78,7 +78,7 @@ impl<'sock> ReadinessBased<'sock> {
                     let caller = recvfd_request.caller();
 
                     if let Err(Error {
-                        errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                        errno: errno::EWOULDBLOCK,
                     }) = result
                     {
                         self.states.insert(caller.id, (caller, recvfd_request.op()));
@@ -101,10 +101,10 @@ impl<'sock> ReadinessBased<'sock> {
             };
             let resp = match op.handle_sync_dont_consume(&caller, &mut *acquire_scheme()) {
                 SchemeResponse::Opened(Err(Error {
-                    errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                    errno: errno::EWOULDBLOCK,
                 }))
                 | SchemeResponse::Regular(Err(Error {
-                    errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                    errno: errno::EWOULDBLOCK,
                 })) if !op.is_explicitly_nonblock() => {
                     self.states.insert(caller.id, (caller, op));
                     continue;
@@ -139,10 +139,10 @@ impl<'sock> ReadinessBased<'sock> {
         let (caller, mut op) = states.remove(&id).ok_or(Error::new(EIO))?;
         let resp = match op.handle_sync_dont_consume(&caller, scheme) {
             SchemeResponse::Opened(Err(Error {
-                errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                errno: errno::EWOULDBLOCK,
             }))
             | SchemeResponse::Regular(Err(Error {
-                errno: errno::EWOULDBLOCK | errno::EAGAIN,
+                errno: errno::EWOULDBLOCK,
             })) if !op.is_explicitly_nonblock() => {
                 return Ok(ControlFlow::Continue((caller, op)));
             }
@@ -187,7 +187,7 @@ impl<'sock> ReadinessBased<'sock> {
             //Ok(()) if !self.responses_to_write.is_empty() => Ok(false), // EOF, FIXME
             Ok(())
             | Err(Error {
-                errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
+                errno: errno::EINTR | errno::EWOULDBLOCK,
             }) => Ok(true),
             Err(err) => return Err(LError::from(err).into()),
         }
