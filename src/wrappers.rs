@@ -41,7 +41,7 @@ impl<'sock> ReadinessBased<'sock> {
             Ok(()) if self.requests_read.is_empty() => Ok(false), // EOF
             Ok(())
             | Err(Error {
-                errno: errno::EINTR | errno::EWOULDBLOCK,
+                errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
             }) => Ok(true),
             Err(err) => return Err(err),
         }
@@ -187,7 +187,7 @@ impl<'sock> ReadinessBased<'sock> {
             //Ok(()) if !self.responses_to_write.is_empty() => Ok(false), // EOF, FIXME
             Ok(())
             | Err(Error {
-                errno: errno::EINTR | errno::EWOULDBLOCK,
+                errno: errno::EINTR | errno::EWOULDBLOCK | errno::EAGAIN,
             }) => Ok(true),
             Err(err) => return Err(LError::from(err).into()),
         }
