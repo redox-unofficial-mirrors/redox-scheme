@@ -40,6 +40,9 @@ impl<F> OpFdPathLike<F> {
     pub fn path(&self) -> &str {
         self.inner.path()
     }
+    pub fn flags(&self) -> &F {
+        &self.inner.flags
+    }
 }
 
 impl<Flags: Debug> Debug for OpFdPathLike<Flags> {
@@ -159,6 +162,7 @@ pub enum Op {
     OpenAt(OpFdPathLike<usize>),
     Rmdir(OpPathLike<()>),
     Unlink(OpPathLike<()>),
+    UnlinkAt(OpFdPathLike<usize>),
     Dup(OpQueryWrite<[u8]>),
     Read(OpRead),
     Write(OpWrite),
@@ -265,6 +269,15 @@ impl Op {
                 req,
                 path: str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)),
                 flags: (),
+            }),
+            Opcode::UnlinkAt => Op::UnlinkAt(OpFdPathLike {
+                fd: a,
+                fcntl_flags: 0,
+                inner: OpPathLike {
+                    req,
+                    path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                    flags: d,
+                },
             }),
             Opcode::Dup => Op::Dup(OpQueryWrite {
                 req,
@@ -401,6 +414,7 @@ impl Op {
     pub fn file_id(&self) -> Option<usize> {
         Some(match self {
             Op::Open(_) | Op::Rmdir(_) | Op::Unlink(_) => return None,
+            Op::UnlinkAt(op) => op.fd,
             Op::OpenAt(op) => op.fd,
             Op::Dup(op) => op.fd,
             Op::Read(op) => op.fd,
@@ -531,7 +545,10 @@ impl Op {
             }
             Op::Rmdir(ref req) => s.rmdir(req.path(), &caller).map(|()| 0).into(),
             Op::Unlink(ref req) => s.unlink(req.path(), &caller).map(|()| 0).into(),
-
+            Op::UnlinkAt(ref req) => s
+                .unlinkat(req.fd, req.path(), req.inner.flags, &caller)
+                .map(|()| 0)
+                .into(),
             Op::Dup(ref req) => {
                 let res = s.dup(req.fd, req.buf(), &caller);
                 return SchemeResponse::Opened(res);
@@ -635,7 +652,13 @@ impl Op {
                 s.unlink(req.path(), &caller).await.map(|()| 0),
                 req.into_tag(),
             ),
-
+            Op::UnlinkAt(req) => (
+                s.unlinkat(req.fd, req.path(), req.inner.flags, &caller)
+                    .await
+                    .map(|()| 0)
+                    .into(),
+                req.into_tag(),
+            ),
             Op::Dup(req) => {
                 let res = s.dup(req.fd, req.buf(), &caller).await;
                 return Response::open_dup_like(res, req);
@@ -761,6 +784,16 @@ pub trait SchemeAsync {
     }
 
     async fn unlink(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
+        Err(Error::new(ENOENT))
+    }
+
+    async fn unlinkat(
+        &mut self,
+        fd: usize,
+        path: &str,
+        flags: usize,
+        ctx: &CallerCtx,
+    ) -> Result<()> {
         Err(Error::new(ENOENT))
     }
 
@@ -922,6 +955,10 @@ pub trait SchemeSync {
     }
 
     fn unlink(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
+        Err(Error::new(ENOENT))
+    }
+
+    fn unlinkat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<()> {
         Err(Error::new(ENOENT))
     }
 
@@ -1146,6 +1183,7 @@ impl IntoTag for Op {
             Open(op) => op.into_tag(),
             OpenAt(op) => op.into_tag(),
             Rmdir(op) | Self::Unlink(op) => op.into_tag(),
+            UnlinkAt(op) => op.into_tag(),
             Dup(op) => op.into_tag(),
             Read(op) => op.into_tag(),
             Write(op) => op.into_tag(),
@@ -1175,6 +1213,7 @@ impl IntoTag for Op {
             Open(op) => op.req_id(),
             OpenAt(op) => op.req_id(),
             Rmdir(op) | Self::Unlink(op) => op.req_id(),
+            UnlinkAt(op) => op.req_id(),
             Dup(op) => op.req_id(),
             Read(op) => op.req_id(),
             Write(op) => op.req_id(),
