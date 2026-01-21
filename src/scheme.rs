@@ -2,12 +2,14 @@
 
 use core::fmt::{self, Debug};
 use core::mem::size_of;
+use core::ops::{Deref, DerefMut};
 use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
 
 use crate::{
-    CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Request, Response, SendFdRequest, Tag,
+    CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Request, Response, SendFdRequest,
+    Socket, Tag,
 };
 
 pub struct OpPathLike<Flags> {
@@ -158,10 +160,7 @@ impl OpWrite {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Op {
-    Open(OpPathLike<usize>),
     OpenAt(OpFdPathLike<usize>),
-    Rmdir(OpPathLike<()>),
-    Unlink(OpPathLike<()>),
     UnlinkAt(OpFdPathLike<usize>),
     Dup(OpQueryWrite<[u8]>),
     Read(OpRead),
@@ -246,11 +245,6 @@ impl Op {
         use core::{slice, str};
 
         Some(match opcode {
-            Opcode::Open => Op::Open(OpPathLike {
-                req,
-                path: str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)),
-                flags: c,
-            }),
             Opcode::OpenAt => Op::OpenAt(OpFdPathLike {
                 fd: a,
                 fcntl_flags: e as u32,
@@ -259,16 +253,6 @@ impl Op {
                     path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
                     flags: d,
                 },
-            }),
-            Opcode::Rmdir => Op::Rmdir(OpPathLike {
-                req,
-                path: str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)),
-                flags: (),
-            }),
-            Opcode::Unlink => Op::Unlink(OpPathLike {
-                req,
-                path: str::from_utf8_unchecked(slice::from_raw_parts(a as *const u8, b)),
-                flags: (),
             }),
             Opcode::UnlinkAt => Op::UnlinkAt(OpFdPathLike {
                 fd: a,
@@ -406,14 +390,12 @@ impl Op {
             Self::Read(r) => r.flags,
             Self::Write(w) => w.flags,
             Self::OpenAt(o) => o.fcntl_flags,
-            Self::Open(o) => o.flags as u32,
             _ => 0,
         };
         flags as usize & O_NONBLOCK != 0
     }
     pub fn file_id(&self) -> Option<usize> {
         Some(match self {
-            Op::Open(_) | Op::Rmdir(_) | Op::Unlink(_) => return None,
             Op::UnlinkAt(op) => op.fd,
             Op::OpenAt(op) => op.fd,
             Op::Dup(op) => op.fd,
@@ -529,10 +511,6 @@ impl Op {
         s: &mut impl SchemeSync,
     ) -> SchemeResponse {
         match *self {
-            Op::Open(ref req) => {
-                let res = s.open(req.path(), req.flags, &caller);
-                return SchemeResponse::Opened(res);
-            }
             Op::OpenAt(ref req) => {
                 let res = s.openat(
                     req.fd,
@@ -543,8 +521,6 @@ impl Op {
                 );
                 return SchemeResponse::Opened(res);
             }
-            Op::Rmdir(ref req) => s.rmdir(req.path(), &caller).map(|()| 0).into(),
-            Op::Unlink(ref req) => s.unlink(req.path(), &caller).map(|()| 0).into(),
             Op::UnlinkAt(ref req) => s
                 .unlinkat(req.fd, req.path(), req.inner.flags, &caller)
                 .map(|()| 0)
@@ -628,10 +604,6 @@ impl Op {
     // that futures stay small.
     pub async fn handle_async(self, caller: CallerCtx, s: &mut impl SchemeAsync) -> Response {
         let (res, tag) = match self {
-            Op::Open(req) => {
-                let res = s.open(req.path(), req.flags, &caller).await;
-                return Response::open_dup_like(res, req);
-            }
             Op::OpenAt(req) => {
                 let res = s
                     .openat(
@@ -644,14 +616,6 @@ impl Op {
                     .await;
                 return Response::open_dup_like(res, req);
             }
-            Op::Rmdir(req) => (
-                s.rmdir(req.path(), &caller).await.map(|()| 0),
-                req.into_tag(),
-            ),
-            Op::Unlink(req) => (
-                s.unlink(req.path(), &caller).await.map(|()| 0),
-                req.into_tag(),
-            ),
             Op::UnlinkAt(req) => (
                 s.unlinkat(req.fd, req.path(), req.inner.flags, &caller)
                     .await
@@ -764,8 +728,8 @@ impl Op {
 #[allow(unused_variables)]
 pub trait SchemeAsync {
     /* Scheme operations */
-    async fn open(&mut self, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
-        Err(Error::new(ENOENT))
+    fn scheme_root(&mut self) -> Result<usize> {
+        Err(Error::new(ENOSYS))
     }
 
     async fn openat(
@@ -777,14 +741,6 @@ pub trait SchemeAsync {
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
-    }
-
-    async fn rmdir(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(ENOENT))
-    }
-
-    async fn unlink(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(ENOENT))
     }
 
     async fn unlinkat(
@@ -935,10 +891,9 @@ pub trait SchemeAsync {
 #[allow(unused_variables)]
 pub trait SchemeSync {
     /* Scheme operations */
-    fn open(&mut self, path: &str, flags: usize, ctx: &CallerCtx) -> Result<OpenResult> {
-        Err(Error::new(ENOENT))
+    fn scheme_root(&mut self) -> Result<usize> {
+        Err(Error::new(ENOSYS))
     }
-
     fn openat(
         &mut self,
         fd: usize,
@@ -948,14 +903,6 @@ pub trait SchemeSync {
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
-    }
-
-    fn rmdir(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(ENOENT))
-    }
-
-    fn unlink(&mut self, path: &str, ctx: &CallerCtx) -> Result<()> {
-        Err(Error::new(ENOENT))
     }
 
     fn unlinkat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<()> {
@@ -1087,10 +1034,40 @@ pub trait SchemeSync {
     fn on_sendfd(&mut self, sendfd_request: &SendFdRequest) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
+
     fn on_recvfd(&mut self, recvfd_request: &RecvFdRequest) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
     }
 }
+
+pub fn register_sync_scheme<S: SchemeSync>(
+    socket: &Socket,
+    name: &str,
+    scheme: &mut S,
+) -> Result<()> {
+    let cap_id = scheme.scheme_root()?;
+    register_scheme_inner(socket, name, cap_id)
+}
+
+pub fn register_async_scheme<S: SchemeAsync>(
+    socket: &Socket,
+    name: &str,
+    scheme: &mut S,
+) -> Result<()> {
+    let cap_id = scheme.scheme_root()?;
+    register_scheme_inner(socket, name, cap_id)
+}
+
+pub fn register_scheme_inner(socket: &Socket, name: &str, cap_id: usize) -> Result<()> {
+    let cap_fd = socket.create_this_scheme_fd(0, cap_id, 0, 0)?;
+    let current_namespace_fd = libredox::call::getns()?;
+    Ok(libredox::call::register_scheme_to_ns(
+        current_namespace_fd,
+        name,
+        cap_fd,
+    )?)
+}
+
 pub trait IntoTag {
     fn into_tag(self) -> Tag;
     fn req_id(&self) -> Id;
@@ -1180,9 +1157,7 @@ impl IntoTag for Op {
     fn into_tag(self) -> Tag {
         use Op::*;
         match self {
-            Open(op) => op.into_tag(),
             OpenAt(op) => op.into_tag(),
-            Rmdir(op) | Self::Unlink(op) => op.into_tag(),
             UnlinkAt(op) => op.into_tag(),
             Dup(op) => op.into_tag(),
             Read(op) => op.into_tag(),
@@ -1210,9 +1185,7 @@ impl IntoTag for Op {
     fn req_id(&self) -> Id {
         use Op::*;
         match self {
-            Open(op) => op.req_id(),
             OpenAt(op) => op.req_id(),
-            Rmdir(op) | Self::Unlink(op) => op.req_id(),
             UnlinkAt(op) => op.req_id(),
             Dup(op) => op.req_id(),
             Read(op) => op.req_id(),

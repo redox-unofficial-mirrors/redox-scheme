@@ -239,25 +239,30 @@ pub struct Socket {
 }
 
 impl Socket {
-    fn create_inner(name: &str, nonblock: bool) -> Result<Self> {
+    pub fn create_inner(cap_fd: usize, nonblock: bool) -> Result<Self> {
         let mut flags = flag::O_FSYNC | 0x0020_0000 /* O_EXLOCK */;
 
         if nonblock {
             flags |= flag::O_NONBLOCK;
         }
 
-        let fd = libredox::Fd::open(
-            &format!(":{name}"),
-            flag::O_CLOEXEC | flag::O_CREAT | flags,
-            0,
-        )?;
-        Ok(Self { inner: fd })
+        let fd = syscall::dup(cap_fd, b"create-scheme")?;
+        syscall::fcntl(fd, syscall::F_SETFD, flag::O_CLOEXEC as usize)?;
+
+        syscall::fcntl(fd, syscall::F_SETFL, flags as usize)?;
+        Ok(Self {
+            inner: libredox::Fd::new(fd),
+        })
     }
-    pub fn create(name: impl AsRef<str>) -> Result<Self> {
-        Self::create_inner(name.as_ref(), false)
+    pub fn create() -> Result<Self> {
+        let cap_fd =
+            libredox::Fd::open("/scheme/namespace/scheme-creation-cap", flag::O_CLOEXEC, 0)?;
+        Self::create_inner(cap_fd.raw(), false)
     }
-    pub fn nonblock(name: impl AsRef<str>) -> Result<Self> {
-        Self::create_inner(name.as_ref(), true)
+    pub fn nonblock() -> Result<Self> {
+        let cap_fd =
+            libredox::Fd::open("/scheme/namespace/scheme-creation-cap", flag::O_CLOEXEC, 0)?;
+        Self::create_inner(cap_fd.raw(), true)
     }
     // TODO: trait RequestBuf?
     pub fn read_requests(&self, buf: &mut Vec<Request>, behavior: SignalBehavior) -> Result<()> {
@@ -297,6 +302,27 @@ impl Socket {
     }
     pub fn inner(&self) -> &libredox::Fd {
         &self.inner
+    }
+    pub fn create_this_scheme_fd(
+        &self,
+        offset: u64,
+        number: usize,
+        flags: usize,
+        internal_flags: u8,
+    ) -> Result<usize> {
+        let new_fd_params = syscall::data::NewFdParams {
+            offset,
+            number,
+            flags,
+            internal_flags,
+        };
+        let buf: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                &new_fd_params as *const _ as *const u8,
+                core::mem::size_of::<syscall::data::NewFdParams>(),
+            )
+        };
+        Ok(self.inner().dup(buf)?)
     }
 }
 
