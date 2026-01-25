@@ -2,11 +2,9 @@
 
 extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
-use alloc::format;
 use alloc::vec::Vec;
 
 use core::mem;
-use core::str;
 use core::task::Poll;
 
 use libredox::flag;
@@ -264,6 +262,9 @@ impl Socket {
             libredox::Fd::open("/scheme/namespace/scheme-creation-cap", flag::O_CLOEXEC, 0)?;
         Self::create_inner(cap_fd.raw(), true)
     }
+    pub unsafe fn from_fd(fd: libredox::Fd) -> Self {
+        Self { inner: fd }
+    }
     // TODO: trait RequestBuf?
     pub fn read_requests(&self, buf: &mut Vec<Request>, behavior: SignalBehavior) -> Result<()> {
         let num_read = read_requests(self.inner.raw(), buf.spare_capacity_mut(), behavior)?;
@@ -302,6 +303,9 @@ impl Socket {
     }
     pub fn inner(&self) -> &libredox::Fd {
         &self.inner
+    }
+    pub fn into_inner(self) -> libredox::Fd {
+        self.inner
     }
     pub fn create_this_scheme_fd(
         &self,
