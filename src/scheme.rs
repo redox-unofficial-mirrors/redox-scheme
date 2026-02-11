@@ -223,6 +223,7 @@ pub enum Op {
     },
 
     Call(OpCall),
+    StdFsCall(OpCall),
 
     Getdents(OpGetdents),
 
@@ -359,6 +360,12 @@ impl Op {
                 payload: slice::from_raw_parts_mut(b as *mut u8, c),
                 metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
             }),
+            Opcode::StdFsCall => Op::StdFsCall(OpCall {
+                req,
+                fd: a,
+                payload: slice::from_raw_parts_mut(b as *mut u8, c),
+                metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
+            }),
             Opcode::Getdents => Op::Getdents(OpGetdents {
                 req,
                 fd: a,
@@ -417,6 +424,7 @@ impl Op {
             Op::FstatVfs(op) => op.fd,
             Op::Futimens(op) => op.fd,
             Op::Call(op) => op.fd,
+            Op::StdFsCall(op) => op.fd,
             Op::Getdents(op) => op.fd,
             Op::Recvfd(req) => req.id(),
         })
@@ -583,6 +591,12 @@ impl Op {
                 s.call(fd, payload, metadata, &caller).into()
             }
 
+            Op::StdFsCall(ref mut req) => {
+                let fd = req.fd;
+                let (payload, metadata) = req.payload_and_metadata();
+                s.std_fs_call(fd, payload, metadata, &caller).into()
+            }
+
             Op::Getdents(ref mut req) => {
                 let OpGetdents {
                     fd, opaque_offset, ..
@@ -704,6 +718,12 @@ impl Op {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
                 (s.call(fd, payload, metadata, &caller).await, req.into_tag())
+            }
+
+            Op::StdFsCall(mut req) => {
+                let fd = req.fd;
+                let (payload, metadata) = req.payload_and_metadata();
+                (s.std_fs_call(fd, payload, metadata, &caller).await, req.into_tag())
             }
 
             Op::Getdents(mut req) => {
@@ -853,6 +873,16 @@ pub trait SchemeAsync {
         Err(Error::new(EOPNOTSUPP))
     }
 
+    async fn std_fs_call(
+        &mut self,
+        id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     async fn getdents<'buf>(
         &mut self,
         id: usize,
@@ -989,6 +1019,16 @@ pub trait SchemeSync {
     }
 
     fn call(
+        &mut self,
+        id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn std_fs_call(
         &mut self,
         id: usize,
         payload: &mut [u8],
@@ -1178,6 +1218,7 @@ impl IntoTag for Op {
             FstatVfs(op) => op.into_tag(),
             Futimens(op) => op.into_tag(),
             Call(op) => op.into_tag(),
+            StdFsCall(op) => op.into_tag(),
             Getdents(op) => op.into_tag(),
             Recvfd(req) => req.into_tag(),
         }
@@ -1206,6 +1247,7 @@ impl IntoTag for Op {
             FstatVfs(op) => op.req_id(),
             Futimens(op) => op.req_id(),
             Call(op) => op.req_id(),
+            StdFsCall(op) => op.req_id(),
             Getdents(op) => op.req_id(),
             Recvfd(req) => req.req_id(),
         }
