@@ -723,7 +723,10 @@ impl Op {
             Op::StdFsCall(mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                (s.std_fs_call(fd, payload, metadata, &caller).await, req.into_tag())
+                (
+                    s.std_fs_call(fd, payload, metadata, &caller).await,
+                    req.into_tag(),
+                )
             }
 
             Op::Getdents(mut req) => {
