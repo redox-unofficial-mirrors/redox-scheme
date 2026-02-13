@@ -2,14 +2,13 @@
 
 use core::fmt::{self, Debug};
 use core::mem::size_of;
-use core::ops::{Deref, DerefMut};
+use redox_advisory_flock::{LockKind, LockOwner, LockResult, LockSet};
 use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
-use syscall::{error::*, flag::*, Stat, StatVfs, TimeSpec};
+use syscall::{error::*, flag::*, Stat, StatVfs, StdFsCallMeta, TimeSpec};
 
 use crate::{
-    CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Request, Response, SendFdRequest,
-    Socket, Tag,
+    CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Response, SendFdRequest, Socket, Tag,
 };
 
 pub struct OpPathLike<Flags> {
@@ -447,7 +446,7 @@ impl CallRequest {
             None => Err(self),
         }
     }
-    pub async fn handle_async(self, s: &mut impl SchemeAsync) -> Response {
+    pub async fn handle_async(self, s: &mut impl SchemeAsync, state: &mut SchemeState) -> Response {
         let caller = self.caller();
 
         let op = match self.op() {
@@ -455,16 +454,16 @@ impl CallRequest {
             Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
         };
 
-        op.handle_async(caller, s).await
+        op.handle_async(caller, s, state).await
     }
-    pub fn handle_sync(self, s: &mut impl SchemeSync) -> Response {
+    pub fn handle_sync(self, s: &mut impl SchemeSync, state: &mut SchemeState) -> Response {
         let caller = self.caller();
 
         let op = match self.op() {
             Ok(op) => op,
             Err(this) => return Response::new(Err(Error::new(ENOSYS)), this),
         };
-        op.handle_sync(caller, s)
+        op.handle_sync(caller, s, state)
     }
 }
 
@@ -497,19 +496,30 @@ impl RecvFdRequest {
     }
 }
 
+#[derive(Debug)]
 pub enum SchemeResponse {
     Regular(Result<usize>),
+    RegularAndNotifyOnDetach(Result<usize>),
     Opened(Result<OpenResult>),
 }
+
 impl From<Result<usize>> for SchemeResponse {
     fn from(value: Result<usize>) -> Self {
         Self::Regular(value)
     }
 }
 impl Op {
-    pub fn handle_sync(mut self, caller: CallerCtx, s: &mut impl SchemeSync) -> Response {
-        match self.handle_sync_dont_consume(&caller, s) {
+    pub fn handle_sync(
+        mut self,
+        caller: CallerCtx,
+        s: &mut impl SchemeSync,
+        state: &mut SchemeState,
+    ) -> Response {
+        match self.handle_sync_dont_consume(&caller, s, state) {
             SchemeResponse::Opened(open) => Response::open_dup_like(open, self),
+            SchemeResponse::RegularAndNotifyOnDetach(status) => {
+                Response::new_notify_on_detach(status, self)
+            }
             SchemeResponse::Regular(reg) => Response::new(reg, self),
         }
     }
@@ -517,6 +527,7 @@ impl Op {
         &mut self,
         caller: &CallerCtx,
         s: &mut impl SchemeSync,
+        state: &mut SchemeState,
     ) -> SchemeResponse {
         match *self {
             Op::OpenAt(ref req) => {
@@ -594,7 +605,19 @@ impl Op {
             Op::StdFsCall(ref mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                s.std_fs_call(fd, payload, metadata, &caller).into()
+                let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
+                    return Err(Error::new(EOPNOTSUPP)).into();
+                };
+                if let Some(resp) = state.std_fs_call(
+                    fd,
+                    s.inode(fd).ok(),
+                    &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    &caller,
+                ) {
+                    return resp;
+                } else {
+                    s.std_fs_call(fd, payload, metadata, &caller).into()
+                }
             }
 
             Op::Getdents(ref mut req) => {
@@ -616,7 +639,13 @@ impl Op {
     // XXX: Although this has not yet been benchmarked, it likely makes sense for the
     // readiness-based (or non-blockable) and completion-based APIs to diverge, as it is imperative
     // that futures stay small.
-    pub async fn handle_async(self, caller: CallerCtx, s: &mut impl SchemeAsync) -> Response {
+    pub async fn handle_async(
+        self,
+        caller: CallerCtx,
+        s: &mut impl SchemeAsync,
+        // FIXME
+        state: &mut SchemeState,
+    ) -> Response {
         let (res, tag) = match self {
             Op::OpenAt(req) => {
                 let res = s
@@ -723,10 +752,28 @@ impl Op {
             Op::StdFsCall(mut req) => {
                 let fd = req.fd;
                 let (payload, metadata) = req.payload_and_metadata();
-                (
-                    s.std_fs_call(fd, payload, metadata, &caller).await,
-                    req.into_tag(),
-                )
+                let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
+                    return Response::err(EOPNOTSUPP, req);
+                };
+                if let Some(resp) = state.std_fs_call(
+                    fd,
+                    s.inode(fd).await.ok(),
+                    &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    &caller,
+                ) {
+                    match resp {
+                        SchemeResponse::Regular(status) => return Response::new(status, req),
+                        SchemeResponse::RegularAndNotifyOnDetach(status) => {
+                            return Response::new_notify_on_detach(status, req)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    (
+                        s.std_fs_call(fd, payload, metadata, &caller).await,
+                        req.into_tag(),
+                    )
+                }
             }
 
             Op::Getdents(mut req) => {
@@ -763,6 +810,10 @@ pub trait SchemeAsync {
         fcntl_flags: u32,
         ctx: &CallerCtx,
     ) -> Result<OpenResult> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    async fn inode(&self, id: usize) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -940,6 +991,10 @@ pub trait SchemeSync {
 
     fn unlinkat(&mut self, fd: usize, path: &str, flags: usize, ctx: &CallerCtx) -> Result<()> {
         Err(Error::new(ENOENT))
+    }
+
+    fn inode(&self, id: usize) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     /* Resource operations */
@@ -1254,5 +1309,89 @@ impl IntoTag for Op {
             Getdents(op) => op.req_id(),
             Recvfd(req) => req.req_id(),
         }
+    }
+}
+
+pub struct SchemeState {
+    flocks: LockSet,
+}
+
+impl SchemeState {
+    pub fn new() -> Self {
+        Self {
+            flocks: LockSet::new(),
+        }
+    }
+
+    fn std_fs_call(
+        &mut self,
+        id: usize,
+        inode: Option<usize>,
+        metadata: &StdFsCallMeta,
+        ctx: &CallerCtx,
+    ) -> Option<SchemeResponse> {
+        let kind = StdFsCallKind::try_from_raw(metadata.kind).unwrap();
+        match kind {
+            StdFsCallKind::Lock => Some({
+                let inode = inode?;
+                let (owner, start, len, kind) = (
+                    if metadata.arg1 & (1 << 63) == (1 << 63) {
+                        LockOwner::Resource { fd: id }
+                    } else {
+                        LockOwner::Process {
+                            pid: ctx.pid,
+                            inode,
+                        }
+                    },
+                    (metadata.arg1 & !(1 << 63)) as usize,
+                    (metadata.arg2 & !(1 << 63)) as usize,
+                    if metadata.arg2 & (1 << 63) == (1 << 63) {
+                        LockKind::Exclusive
+                    } else {
+                        LockKind::Shared
+                    },
+                );
+
+                match self.flocks.lock(kind, owner, start, len) {
+                    LockResult::Ok if owner.is_process() => {
+                        SchemeResponse::RegularAndNotifyOnDetach(Ok(0))
+                    }
+                    LockResult::Ok if !owner.is_process() => SchemeResponse::Regular(Ok(0)),
+                    LockResult::Conflict => SchemeResponse::Regular(Err(Error::new(EEXIST))),
+                    _ => unreachable!(),
+                }
+            }),
+
+            StdFsCallKind::Unlock => Some({
+                let inode = inode?;
+                let (owner, start, len) = (
+                    if metadata.arg1 & (1 << 63) == (1 << 63) {
+                        LockOwner::Resource { fd: id }
+                    } else {
+                        LockOwner::Process {
+                            pid: ctx.pid,
+                            inode,
+                        }
+                    },
+                    (metadata.arg1 & !(1 << 63)) as usize,
+                    metadata[2] as usize,
+                );
+
+                match self.flocks.unlock(owner, start, len) {
+                    LockResult::Ok | LockResult::NotPresent => SchemeResponse::Regular(Ok(0)),
+                    _ => unreachable!(),
+                }
+            }),
+
+            _ => None,
+        }
+    }
+
+    pub fn on_close(&mut self, id: usize) {
+        self.flocks.on_close(id, None)
+    }
+
+    pub fn on_detach(&mut self, id: usize, pid: usize) {
+        self.flocks.on_close(id, Some(pid))
     }
 }

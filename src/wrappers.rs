@@ -7,7 +7,7 @@ use libredox::error::Error as LError;
 use syscall::error::{self as errno, Error, ECANCELED, EIO, EOPNOTSUPP};
 use syscall::Result;
 
-use crate::scheme::{Op, SchemeResponse, SchemeSync};
+use crate::scheme::{Op, SchemeResponse, SchemeState, SchemeSync};
 use crate::{CallerCtx, Id, Request, RequestKind, Response, SignalBehavior, Socket};
 
 pub struct ReadinessBased<'sock> {
@@ -19,6 +19,7 @@ pub struct ReadinessBased<'sock> {
     ready_queue: VecDeque<Id>,
 
     socket: &'sock Socket,
+    state: SchemeState,
 }
 impl<'sock> ReadinessBased<'sock> {
     pub fn new(socket: &'sock Socket, queue_size: usize) -> Self {
@@ -28,6 +29,7 @@ impl<'sock> ReadinessBased<'sock> {
             states: HashMap::new(),
             socket,
             ready_queue: VecDeque::new(),
+            state: SchemeState::new(),
         }
     }
     pub fn read_requests(&mut self) -> Result<bool> {
@@ -64,6 +66,7 @@ impl<'sock> ReadinessBased<'sock> {
                     continue;
                 }
                 RequestKind::OnClose { id } => {
+                    // TODO: state.on_close()
                     acquire_scheme().on_close(id);
                     continue;
                 }
@@ -99,19 +102,24 @@ impl<'sock> ReadinessBased<'sock> {
                     continue;
                 }
             };
-            let resp = match op.handle_sync_dont_consume(&caller, &mut *acquire_scheme()) {
-                SchemeResponse::Opened(Err(Error {
-                    errno: errno::EWOULDBLOCK,
-                }))
-                | SchemeResponse::Regular(Err(Error {
-                    errno: errno::EWOULDBLOCK,
-                })) if !op.is_explicitly_nonblock() => {
-                    self.states.insert(caller.id, (caller, op));
-                    continue;
-                }
-                SchemeResponse::Regular(r) => Response::new(r, op),
-                SchemeResponse::Opened(o) => Response::open_dup_like(o, op),
-            };
+            let resp =
+                match op.handle_sync_dont_consume(&caller, &mut *acquire_scheme(), &mut self.state)
+                {
+                    SchemeResponse::Opened(Err(Error {
+                        errno: errno::EWOULDBLOCK,
+                    }))
+                    | SchemeResponse::Regular(Err(Error {
+                        errno: errno::EWOULDBLOCK,
+                    })) if !op.is_explicitly_nonblock() => {
+                        self.states.insert(caller.id, (caller, op));
+                        continue;
+                    }
+                    SchemeResponse::Regular(r) => Response::new(r, op),
+                    SchemeResponse::RegularAndNotifyOnDetach(status) => {
+                        Response::new_notify_on_detach(status, op)
+                    }
+                    SchemeResponse::Opened(o) => Response::open_dup_like(o, op),
+                };
             self.responses_to_write.push_back(resp);
         }
     }
@@ -119,7 +127,7 @@ impl<'sock> ReadinessBased<'sock> {
     // TODO: panic if id isn't present?
     pub fn poll_request(&mut self, id: Id, scheme: &mut impl SchemeSync) -> Result<bool> {
         Ok(
-            match Self::poll_request_inner(id, scheme, &mut self.states)? {
+            match Self::poll_request_inner(id, scheme, &mut self.state, &mut self.states)? {
                 ControlFlow::Continue((caller, op)) => {
                     self.states.insert(id, (caller, op));
                     false
@@ -131,13 +139,15 @@ impl<'sock> ReadinessBased<'sock> {
             },
         )
     }
+
     fn poll_request_inner(
         id: Id,
         scheme: &mut impl SchemeSync,
+        state: &mut SchemeState,
         states: &mut HashMap<Id, (CallerCtx, Op)>,
     ) -> Result<ControlFlow<Response, (CallerCtx, Op)>> {
         let (caller, mut op) = states.remove(&id).ok_or(Error::new(EIO))?;
-        let resp = match op.handle_sync_dont_consume(&caller, scheme) {
+        let resp = match op.handle_sync_dont_consume(&caller, scheme, state) {
             SchemeResponse::Opened(Err(Error {
                 errno: errno::EWOULDBLOCK,
             }))
@@ -148,6 +158,9 @@ impl<'sock> ReadinessBased<'sock> {
             }
             SchemeResponse::Regular(r) => Response::new(r, op),
             SchemeResponse::Opened(o) => Response::open_dup_like(o, op),
+            SchemeResponse::RegularAndNotifyOnDetach(status) => {
+                Response::new_notify_on_detach(status, op)
+            }
         };
         Ok(ControlFlow::Break(resp))
     }
@@ -157,7 +170,12 @@ impl<'sock> ReadinessBased<'sock> {
         G: Deref<Target = S> + DerefMut,
     {
         for id in self.ready_queue.drain(..) {
-            match Self::poll_request_inner(id, &mut *acquire_scheme(), &mut self.states)? {
+            match Self::poll_request_inner(
+                id,
+                &mut *acquire_scheme(),
+                &mut self.state,
+                &mut self.states,
+            )? {
                 ControlFlow::Break(resp) => {
                     self.responses_to_write.push_back(resp);
                 }

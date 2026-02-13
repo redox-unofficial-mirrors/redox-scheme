@@ -26,6 +26,7 @@ pub struct CallerCtx {
     pub id: Id,
 }
 
+#[derive(Debug)]
 pub enum OpenResult {
     ThisScheme { number: usize, flags: NewFdFlags },
     OtherScheme { fd: usize },
@@ -87,6 +88,7 @@ pub enum RequestKind {
     MunmapMsg,
     MmapMsg,
     OnClose { id: usize },
+    OnDetach { id: usize, pid: usize },
 }
 
 impl CallRequest {
@@ -223,6 +225,13 @@ impl Request {
             Some(Opcode::RequestMmap) => RequestKind::MmapMsg,
             Some(Opcode::CloseMsg) => RequestKind::OnClose {
                 id: self.sqe.args[0] as usize,
+                // TODO: andypython: not currently set by the kernel
+                // pid: self.sqe.caller as usize,
+            },
+
+            Some(Opcode::Detach) => RequestKind::OnDetach {
+                id: self.sqe.args[0] as usize,
+                pid: self.sqe.caller as usize,
             },
 
             _ => RequestKind::Call(CallRequest {
@@ -360,6 +369,16 @@ impl Response {
             tag: req.into_tag().0 .0,
         })
     }
+
+    pub fn new_notify_on_detach(status: Result<usize>, req: impl IntoTag) -> Self {
+        Self(Cqe {
+            flags: CqeOpcode::RespondAndNotifyOnDetach as u8,
+            extra_raw: [0_u8; 3],
+            result: Error::mux(status) as u64,
+            tag: req.into_tag().0 .0,
+        })
+    }
+
     pub fn open_dup_like(res: Result<OpenResult>, req: impl IntoTag) -> Response {
         match res {
             Ok(OpenResult::ThisScheme { number, flags }) => {
