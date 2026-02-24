@@ -34,6 +34,7 @@ impl LockSet {
         start: usize,
         len: usize,
     ) -> LockResult {
+        // FIXME: andypython: `len - 1` would overflow
         let new = Lock::new(kind, owner, start, start + (len - 1));
         if let Some(_conflict) = self.list.iter().find(|lck| lck.conflicts_with(&new)) {
             return LockResult::Conflict;
@@ -50,7 +51,7 @@ impl LockSet {
 
         if cursor.current().is_none() {
             // No lock with the same owner, insert at the end.
-            cursor.insert_after(new);
+            cursor.insert_before(new);
             return LockResult::Ok;
         }
 
@@ -101,6 +102,7 @@ impl LockSet {
 
     // TODO: take out common logic from lock and unlock
     pub fn unlock(&mut self, owner: LockOwner, start: usize, len: usize) -> LockResult {
+        // FIXME: andypython: `len - 1` would overflow
         let end = start + (len - 1);
         let mut cursor = self.list.cursor_front_mut();
         while let Some(curr) = cursor.current()
@@ -156,6 +158,37 @@ impl LockSet {
             LockResult::NotPresent
         }
     }
+
+    pub fn get_lock(
+        &mut self,
+        kind: LockKind,
+        owner: LockOwner,
+        start: usize,
+        len: usize,
+    ) -> Option<&Lock> {
+        let query = Lock::new(kind, owner, start, start + (len - 1));
+        self.list.iter().find(|lck| lck.conflicts_with(&query))
+    }
+
+    /// `info` should be `None` for OFD-owned locks.
+    pub fn on_close(&mut self, owner: LockOwner) -> LockResult {
+        let mut cursor = self.list.cursor_front_mut();
+        while let Some(curr) = cursor.current() {
+            // Closing any file descriptor drops all POSIX locks that the process holds on that
+            // file, even if the lock was originally acquired using a different file
+            // descriptor.
+            let should_remove = owner == curr.owner;
+
+            if should_remove {
+                cursor.remove_current();
+                return LockResult::Ok;
+            } else {
+                cursor.move_next();
+            }
+        }
+
+        LockResult::NotPresent
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,12 +206,12 @@ impl LockResult {
 }
 
 #[derive(Debug)]
-struct Lock {
-    kind: LockKind,
-    owner: LockOwner,
+pub struct Lock {
+    pub kind: LockKind,
+    pub owner: LockOwner,
     // [start, end)
-    start: usize,
-    end: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl Lock {
@@ -203,6 +236,11 @@ impl Lock {
     #[inline]
     pub fn overlaps_with(&self, other: &Lock) -> bool {
         self.start < other.end && self.end > other.start
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.end - self.start
     }
 }
 
@@ -354,5 +392,24 @@ mod tests {
             set.unlock(LockOwner::Process { pid: 1, inode: 1 }, 0, 8)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_on_close() {
+        let mut set = LockSet::new();
+        assert!(
+            set.lock(
+                LockKind::Exclusive,
+                LockOwner::Process { pid: 1, inode: 1 },
+                0,
+                10
+            )
+            .is_ok()
+        );
+        assert!(
+            set.on_close(LockOwner::Process { pid: 1, inode: 1 })
+                .is_ok()
+        );
+        assert!(set.on_close(LockOwner::Process { pid: 1, inode: 1 }) == LockResult::NotPresent);
     }
 }
