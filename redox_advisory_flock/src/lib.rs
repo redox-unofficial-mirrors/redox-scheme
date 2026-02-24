@@ -208,8 +208,14 @@ impl Lock {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum LockOwner {
-    Process { pid: usize },
+    Process { pid: usize, inode: usize },
     Resource { fd: usize },
+}
+
+impl LockOwner {
+    pub fn is_process(&self) -> bool {
+        matches!(self, Self::Process { .. })
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -237,8 +243,13 @@ mod tests {
     fn mixed_owners() {
         let mut set = LockSet::new();
         assert!(
-            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 2)
-                .is_ok()
+            set.lock(
+                LockKind::Exclusive,
+                LockOwner::Process { pid: 1, inode: 1 },
+                0,
+                2
+            )
+            .is_ok()
         );
         // According to POSIX Issue 8, an **exclusive** process or OFD-owned
         // lock prevents any **other** process or OFD-owned lock from being
@@ -253,23 +264,43 @@ mod tests {
         );
 
         assert!(
-            !set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 0, 2)
-                .is_ok()
+            !set.lock(
+                LockKind::Shared,
+                LockOwner::Process { pid: 2, inode: 2 },
+                0,
+                2
+            )
+            .is_ok()
         );
         assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 0, 2)
-                .is_ok()
+            !set.lock(
+                LockKind::Exclusive,
+                LockOwner::Process { pid: 2, inode: 2 },
+                0,
+                2
+            )
+            .is_ok()
         );
         // Similarly, a **shared** process or OFD-owned lock prevents any
         // **other exclusive** process or OFD-owned lock from being placed on
         // any overlapping byte range.
         assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 2, 2)
-                .is_ok()
+            set.lock(
+                LockKind::Shared,
+                LockOwner::Process { pid: 1, inode: 1 },
+                2,
+                2
+            )
+            .is_ok()
         );
         assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 2, 2)
-                .is_ok()
+            !set.lock(
+                LockKind::Exclusive,
+                LockOwner::Process { pid: 2, inode: 2 },
+                2,
+                2
+            )
+            .is_ok()
         );
         assert!(
             !set.lock(LockKind::Exclusive, LockOwner::Resource { fd: 1 }, 2, 2)
@@ -279,8 +310,13 @@ mod tests {
         // **other shared** process or OFD-owned lock from being placed on any
         // overlapping byte range.
         assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 2, 2)
-                .is_ok()
+            set.lock(
+                LockKind::Shared,
+                LockOwner::Process { pid: 2, inode: 2 },
+                2,
+                2
+            )
+            .is_ok()
         );
         assert!(
             set.lock(LockKind::Shared, LockOwner::Resource { fd: 1 }, 2, 2)
@@ -292,15 +328,31 @@ mod tests {
     fn same_owner() {
         let mut set = LockSet::new();
         assert!(
-            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 8)
-                .is_ok()
+            set.lock(
+                LockKind::Exclusive,
+                LockOwner::Process { pid: 1, inode: 1 },
+                0,
+                8
+            )
+            .is_ok()
         );
         // Requests from the **same** owner as the existing lock are allowed.
         assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 4, 4)
+            set.lock(
+                LockKind::Shared,
+                LockOwner::Process { pid: 1, inode: 1 },
+                4,
+                4
+            )
+            .is_ok()
+        );
+        assert!(
+            set.unlock(LockOwner::Process { pid: 1, inode: 1 }, 4, 8)
                 .is_ok()
         );
-        assert!(set.unlock(LockOwner::Process { pid: 1 }, 4, 8).is_ok());
-        assert!(set.unlock(LockOwner::Process { pid: 1 }, 0, 8).is_ok());
+        assert!(
+            set.unlock(LockOwner::Process { pid: 1, inode: 1 }, 0, 8)
+                .is_ok()
+        );
     }
 }
