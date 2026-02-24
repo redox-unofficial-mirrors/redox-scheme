@@ -10,7 +10,9 @@ fn span_end(start: u64, len: u64) -> Result<u64, LockError> {
     if len == 0 {
         Ok(OFFSET_MAX)
     } else {
-        // TODO: andypython: this can overflow
+        if len - 1 > OFFSET_MAX - start {
+            return Err(LockError::Overflow);
+        }
         Ok(start + (len - 1))
     }
 }
@@ -205,6 +207,7 @@ pub enum LockError {
     Ok,
     Conflict,
     NotPresent,
+    Overflow,
 }
 
 #[derive(Debug)]
