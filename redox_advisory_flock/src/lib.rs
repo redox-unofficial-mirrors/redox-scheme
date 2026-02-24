@@ -4,6 +4,17 @@
 
 use std::collections::LinkedList;
 
+const OFFSET_MAX: u64 = i64::MAX as u64;
+
+fn span_end(start: u64, len: u64) -> Result<u64, LockError> {
+    if len == 0 {
+        Ok(OFFSET_MAX)
+    } else {
+        // TODO: andypython: this can overflow
+        Ok(start + (len - 1))
+    }
+}
+
 #[derive(Debug)]
 pub struct LockSet {
     list: LinkedList<Lock>,
@@ -31,13 +42,12 @@ impl LockSet {
         &mut self,
         kind: LockKind,
         owner: LockOwner,
-        start: usize,
-        len: usize,
-    ) -> LockResult {
-        // FIXME: andypython: `len - 1` would overflow
-        let new = Lock::new(kind, owner, start, start + (len - 1));
+        start: u64,
+        len: u64,
+    ) -> Result<(), LockError> {
+        let new = Lock::new(kind, owner, start, span_end(start, len)?);
         if let Some(_conflict) = self.list.iter().find(|lck| lck.conflicts_with(&new)) {
-            return LockResult::Conflict;
+            return Err(LockError::Conflict);
         }
 
         // Locks are grouped by owner. Find the first lock in the lock set with
@@ -52,7 +62,7 @@ impl LockSet {
         if cursor.current().is_none() {
             // No lock with the same owner, insert at the end.
             cursor.insert_before(new);
-            return LockResult::Ok;
+            return Ok(());
         }
 
         while let Some(curr) = cursor.current()
@@ -73,22 +83,22 @@ impl LockSet {
                 // Merge
                 curr.start = new.start.min(curr.start);
                 curr.end = new.end.max(curr.end);
-                return LockResult::Ok;
+                return Ok(());
             } else {
                 if new.start <= curr.start && new.end >= curr.end {
                     *curr = new;
-                    return LockResult::Ok;
+                    return Ok(());
                 } else if start > curr.start && new.end < curr.end {
                     let right = Lock::new(curr.kind, curr.owner, new.end + 1, curr.end);
                     curr.end = new.start - 1;
                     cursor.insert_after(new);
                     cursor.move_next();
                     cursor.insert_after(right);
-                    return LockResult::Ok;
+                    return Ok(());
                 } else if start > curr.start {
                     curr.end = start - 1;
                     cursor.insert_after(new);
-                    return LockResult::Ok;
+                    return Ok(());
                 } else if new.end < curr.end {
                     curr.start = new.end + 1;
                     break;
@@ -97,13 +107,12 @@ impl LockSet {
         }
 
         cursor.insert_before(new);
-        LockResult::Ok
+        Ok(())
     }
 
     // TODO: take out common logic from lock and unlock
-    pub fn unlock(&mut self, owner: LockOwner, start: usize, len: usize) -> LockResult {
-        // FIXME: andypython: `len - 1` would overflow
-        let end = start + (len - 1);
+    pub fn unlock(&mut self, owner: LockOwner, start: u64, len: u64) -> Result<(), LockError> {
+        let end = span_end(start, len)?;
         let mut cursor = self.list.cursor_front_mut();
         while let Some(curr) = cursor.current()
             && curr.owner != owner
@@ -112,7 +121,7 @@ impl LockSet {
         }
 
         if cursor.current().is_none() {
-            return LockResult::NotPresent;
+            return Err(LockError::NotPresent);
         }
 
         let mut success = false;
@@ -140,7 +149,7 @@ impl LockSet {
                 let right = Lock::new(curr.kind, curr.owner, end, curr.end);
                 curr.end = start - 1;
                 cursor.insert_after(right);
-                return LockResult::Ok;
+                return Ok(());
             } else if start > curr.start {
                 // Unlock covers the tail of this lock. Shrink from right.
                 curr.end = start - 1;
@@ -153,9 +162,9 @@ impl LockSet {
         }
 
         if success {
-            LockResult::Ok
+            Ok(())
         } else {
-            LockResult::NotPresent
+            Err(LockError::NotPresent)
         }
     }
 
@@ -163,15 +172,15 @@ impl LockSet {
         &mut self,
         kind: LockKind,
         owner: LockOwner,
-        start: usize,
-        len: usize,
+        start: u64,
+        len: u64,
     ) -> Option<&Lock> {
         let query = Lock::new(kind, owner, start, start + (len - 1));
-        self.list.iter().find(|lck| lck.conflicts_with(&query))
+        self.list.iter().find(|lck| lck.overlaps_with(&query))
     }
 
     /// `info` should be `None` for OFD-owned locks.
-    pub fn on_close(&mut self, owner: LockOwner) -> LockResult {
+    pub fn on_close(&mut self, owner: LockOwner) -> Result<(), LockError> {
         let mut cursor = self.list.cursor_front_mut();
         while let Some(curr) = cursor.current() {
             // Closing any file descriptor drops all POSIX locks that the process holds on that
@@ -181,28 +190,21 @@ impl LockSet {
 
             if should_remove {
                 cursor.remove_current();
-                return LockResult::Ok;
+                return Ok(());
             } else {
                 cursor.move_next();
             }
         }
 
-        LockResult::NotPresent
+        Err(LockError::NotPresent)
     }
 }
 
 #[derive(Debug, PartialEq)]
-pub enum LockResult {
+pub enum LockError {
     Ok,
     Conflict,
     NotPresent,
-}
-
-impl LockResult {
-    #[inline]
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Self::Ok)
-    }
 }
 
 #[derive(Debug)]
@@ -210,12 +212,12 @@ pub struct Lock {
     pub kind: LockKind,
     pub owner: LockOwner,
     // [start, end)
-    pub start: usize,
-    pub end: usize,
+    pub start: u64,
+    pub end: u64,
 }
 
 impl Lock {
-    pub fn new(kind: LockKind, owner: LockOwner, start: usize, end: usize) -> Self {
+    pub fn new(kind: LockKind, owner: LockOwner, start: u64, end: u64) -> Self {
         Self {
             kind,
             owner,
@@ -239,7 +241,8 @@ impl Lock {
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
+    // FIXME: would this work for whole file locks with start=0 and end=0
+    pub fn len(&self) -> u64 {
         self.end - self.start
     }
 }
@@ -410,6 +413,8 @@ mod tests {
             set.on_close(LockOwner::Process { pid: 1, inode: 1 })
                 .is_ok()
         );
-        assert!(set.on_close(LockOwner::Process { pid: 1, inode: 1 }) == LockResult::NotPresent);
+        assert!(
+            set.on_close(LockOwner::Process { pid: 1, inode: 1 }) == Err(LockError::NotPresent)
+        );
     }
 }
