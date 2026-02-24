@@ -2,7 +2,7 @@
 
 use core::fmt::{self, Debug};
 use core::mem::size_of;
-use redox_advisory_flock::{LockKind, LockOwner, LockResult, LockSet};
+use redox_advisory_flock::{LockError, LockKind, LockOwner, LockSet};
 use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, StdFsCallMeta, TimeSpec};
@@ -612,6 +612,7 @@ impl Op {
                     fd,
                     s.inode(fd).ok(),
                     &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    payload,
                     &caller,
                 ) {
                     return resp;
@@ -759,6 +760,7 @@ impl Op {
                     fd,
                     s.inode(fd).await.ok(),
                     &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    payload,
                     &caller,
                 ) {
                     match resp {
@@ -1328,6 +1330,7 @@ impl SchemeState {
         id: usize,
         inode: Option<usize>,
         metadata: &StdFsCallMeta,
+        payload: &mut [u8],
         ctx: &CallerCtx,
     ) -> Option<SchemeResponse> {
         let kind = StdFsCallKind::try_from_raw(metadata.kind).unwrap();
@@ -1343,8 +1346,8 @@ impl SchemeState {
                             inode,
                         }
                     },
-                    (metadata.arg1 & !(1 << 63)) as usize,
-                    (metadata.arg2 & !(1 << 63)) as usize,
+                    (metadata.arg1 & !(1 << 63)),
+                    (metadata.arg2 & !(1 << 63)),
                     if metadata.arg2 & (1 << 63) == (1 << 63) {
                         LockKind::Exclusive
                     } else {
@@ -1353,11 +1356,11 @@ impl SchemeState {
                 );
 
                 match self.flocks.lock(kind, owner, start, len) {
-                    LockResult::Ok if owner.is_process() => {
-                        SchemeResponse::RegularAndNotifyOnDetach(Ok(0))
+                    Ok(()) if owner.is_process() => SchemeResponse::RegularAndNotifyOnDetach(Ok(0)),
+                    Ok(()) if !owner.is_process() => SchemeResponse::Regular(Ok(0)),
+                    Err(LockError::Conflict) => {
+                        SchemeResponse::Regular(Err(Error::new(EWOULDBLOCK)))
                     }
-                    LockResult::Ok if !owner.is_process() => SchemeResponse::Regular(Ok(0)),
-                    LockResult::Conflict => SchemeResponse::Regular(Err(Error::new(EEXIST))),
                     _ => unreachable!(),
                 }
             }),
@@ -1373,13 +1376,63 @@ impl SchemeState {
                             inode,
                         }
                     },
-                    (metadata.arg1 & !(1 << 63)) as usize,
-                    metadata[2] as usize,
+                    (metadata.arg1 & !(1 << 63)),
+                    metadata[2],
                 );
 
                 match self.flocks.unlock(owner, start, len) {
-                    LockResult::Ok | LockResult::NotPresent => SchemeResponse::Regular(Ok(0)),
+                    Ok(()) | Err(LockError::NotPresent) => SchemeResponse::Regular(Ok(0)),
                     _ => unreachable!(),
+                }
+            }),
+
+            StdFsCallKind::GetLock => Some({
+                let inode = inode?;
+                let (owner, start, len, kind) = (
+                    if metadata.arg1 & (1 << 63) == (1 << 63) {
+                        LockOwner::Resource { fd: id }
+                    } else {
+                        LockOwner::Process {
+                            pid: ctx.pid,
+                            inode,
+                        }
+                    },
+                    (metadata.arg1 & !(1 << 63)),
+                    (metadata.arg2 & !(1 << 63)),
+                    if metadata.arg2 & (1 << 63) == (1 << 63) {
+                        LockKind::Exclusive
+                    } else {
+                        LockKind::Shared
+                    },
+                );
+                match self.flocks.get_lock(kind, owner, start, len) {
+                    Some(lck) => {
+                        assert!(payload.len() == size_of::<u64>() * 2);
+
+                        match lck.owner {
+                            LockOwner::Process {
+                                pid,
+                                inode: lck_inode,
+                            } if pid == ctx.pid && lck_inode == inode => {
+                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))))
+                            }
+                            LockOwner::Resource { fd } if fd == id => {
+                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))))
+                            }
+                            _ => {}
+                        }
+
+                        let payload = unsafe { &mut *(payload.as_mut_ptr() as *mut [u64; 2]) };
+                        payload[0] = lck.start as u64;
+                        payload[1] =
+                            lck.len() as u64 | if lck.kind.is_exclusive() { 1 << 63 } else { 0 };
+
+                        match lck.owner {
+                            LockOwner::Resource { .. } => SchemeResponse::Regular(Ok(0)),
+                            LockOwner::Process { pid, .. } => SchemeResponse::Regular(Ok(pid)),
+                        }
+                    }
+                    None => SchemeResponse::Regular(Err(Error::new(ESRCH))),
                 }
             }),
 
@@ -1388,10 +1441,10 @@ impl SchemeState {
     }
 
     pub fn on_close(&mut self, id: usize) {
-        self.flocks.on_close(id, None)
+        let _ = self.flocks.on_close(LockOwner::Resource { fd: id });
     }
 
-    pub fn on_detach(&mut self, id: usize, pid: usize) {
-        self.flocks.on_close(id, Some(pid))
+    pub fn on_detach(&mut self, _id: usize, inode: usize, pid: usize) {
+        let _ = self.flocks.on_close(LockOwner::Process { pid, inode });
     }
 }
