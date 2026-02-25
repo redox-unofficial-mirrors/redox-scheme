@@ -644,7 +644,6 @@ impl Op {
         self,
         caller: CallerCtx,
         s: &mut impl SchemeAsync,
-        // FIXME
         state: &mut SchemeState,
     ) -> Response {
         let (res, tag) = match self {
