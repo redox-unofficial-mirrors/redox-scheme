@@ -3,31 +3,5 @@
 version = 4
 
 [[package]]
-name = "autocfg"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
-
-[[package]]
-name = "intrusive-collections"
-version = "0.10.0"
-source = "git+https://github.com/Andy-Python-Programmer/intrusive-rs#9be31f828370f32eabeda1fdb4bf94c9de17f273"
-dependencies = [
- "memoffset",
-]
-
-[[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "redox_advisory_flock"
 version = "0.1.0"
-dependencies = [
- "intrusive-collections",
-]
