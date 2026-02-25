@@ -1,7 +1,5 @@
 // Missing: F_SETLKW, F_OFD_SETLKW, and deadlock-detection
 
-#![feature(linked_list_cursors)]
-
 use std::collections::LinkedList;
 
 const OFFSET_MAX: u64 = i64::MAX as u64;
@@ -204,7 +202,6 @@ impl LockSet {
 
 #[derive(Debug, PartialEq)]
 pub enum LockError {
-    Ok,
     Conflict,
     NotPresent,
     Overflow,
@@ -272,11 +269,6 @@ impl LockKind {
     #[inline]
     pub fn is_exclusive(&self) -> bool {
         matches!(self, Self::Exclusive)
-    }
-
-    #[inline]
-    pub fn is_shared(&self) -> bool {
-        matches!(self, Self::Shared)
     }
 }
 

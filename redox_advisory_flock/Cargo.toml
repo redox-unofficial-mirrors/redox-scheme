@@ -1,8 +1,0 @@
-[package]
-name = "redox_advisory_flock"
-version = "0.1.0"
-edition = "2024"
-authors = ["Anhad Singh <andypython@protonmail.com>"]
-
-[dependencies]
-

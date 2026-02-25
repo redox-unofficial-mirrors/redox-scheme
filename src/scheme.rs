@@ -1,8 +1,8 @@
 #![allow(async_fn_in_trait)]
 
+use crate::advisory_flock::{LockError, LockKind, LockOwner, LockSet};
 use core::fmt::{self, Debug};
 use core::mem::size_of;
-use redox_advisory_flock::{LockError, LockKind, LockOwner, LockSet};
 use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
 use syscall::{error::*, flag::*, Stat, StatVfs, StdFsCallMeta, TimeSpec};

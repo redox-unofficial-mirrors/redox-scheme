@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(linked_list_cursors)] // advisory_flock.rs
 
 extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
@@ -14,6 +15,7 @@ use syscall::flag::{
 };
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
+pub(crate) mod advisory_flock;
 pub mod scheme;
 
 #[cfg(feature = "std")]
