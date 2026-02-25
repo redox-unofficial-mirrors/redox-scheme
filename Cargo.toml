@@ -18,4 +18,5 @@ std = []
 [dependencies]
 redox_syscall = { version = "0.7.2" }
 libredox = { version = "0.1.12", default-features = false, features = ["redox_syscall", "call"] }
-redox_advisory_flock = { path = "../redox_advisory_flock/" }
+redox_advisory_flock = { git = "https://gitlab.redox-os.org/andypython/redox_advisory_flock/" }
+
