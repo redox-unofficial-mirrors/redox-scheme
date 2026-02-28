@@ -1,11 +1,10 @@
 #![allow(async_fn_in_trait)]
 
-use crate::advisory_flock::{LockError, LockKind, LockOwner, LockSet};
 use core::fmt::{self, Debug};
 use core::mem::size_of;
 use syscall::dirent::DirentBuf;
 use syscall::schemev2::{Opcode, Sqe};
-use syscall::{error::*, flag::*, Stat, StatVfs, StdFsCallMeta, TimeSpec};
+use syscall::{Stat, StatVfs, StdFsCallMeta, TimeSpec, error::*, flag::*};
 
 use crate::{
     CallRequest, CallerCtx, Id, OpenResult, RecvFdRequest, Response, SendFdRequest, Socket, Tag,
@@ -608,16 +607,19 @@ impl Op {
                 let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
                     return Err(Error::new(EOPNOTSUPP)).into();
                 };
+                let std_fs_call_meta = StdFsCallMeta::new(kind, metadata[1], metadata[2]);
                 if let Some(resp) = state.std_fs_call(
                     fd,
+                    kind,
                     s.inode(fd).ok(),
-                    &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    std_fs_call_meta,
                     payload,
                     &caller,
                 ) {
                     return resp;
                 } else {
-                    s.std_fs_call(fd, payload, metadata, &caller).into()
+                    s.translate_std_fs_call_sync(fd, kind, payload, std_fs_call_meta, &caller)
+                        .into()
                 }
             }
 
@@ -755,23 +757,26 @@ impl Op {
                 let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
                     return Response::err(EOPNOTSUPP, req);
                 };
+                let std_fs_call_meta = StdFsCallMeta::new(kind, metadata[1], metadata[2]);
                 if let Some(resp) = state.std_fs_call(
                     fd,
+                    kind,
                     s.inode(fd).await.ok(),
-                    &StdFsCallMeta::new(kind, metadata[1], metadata[2]),
+                    std_fs_call_meta,
                     payload,
                     &caller,
                 ) {
                     match resp {
                         SchemeResponse::Regular(status) => return Response::new(status, req),
                         SchemeResponse::RegularAndNotifyOnDetach(status) => {
-                            return Response::new_notify_on_detach(status, req)
+                            return Response::new_notify_on_detach(status, req);
                         }
                         _ => unreachable!(),
                     }
                 } else {
                     (
-                        s.std_fs_call(fd, payload, metadata, &caller).await,
+                        s.translate_std_fs_call_async(fd, kind, payload, std_fs_call_meta, &caller)
+                            .await,
                         req.into_tag(),
                     )
                 }
@@ -931,8 +936,9 @@ pub trait SchemeAsync {
     async fn std_fs_call(
         &mut self,
         id: usize,
+        kind: StdFsCallKind,
         payload: &mut [u8],
-        metadata: &[u64],
+        metadata: StdFsCallMeta,
         ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
     ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
@@ -971,6 +977,69 @@ pub trait SchemeAsync {
 
     async fn on_recvfd(&mut self, recvfd_request: &RecvFdRequest) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
+    }
+
+    async fn translate_std_fs_call_async(
+        &mut self,
+        id: usize,
+        kind: StdFsCallKind,
+        payload: &mut [u8],
+        metadata: StdFsCallMeta,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        use syscall::flag::StdFsCallKind::*;
+        match kind {
+            Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).await.map(|_| 0),
+            // TODO: Handle inside redox-scheme
+            // Since this currently requires get_proc_credentials,
+            // fchown cannot be supported on the redox-scheme side.
+            Fchown => self
+                .std_fs_call(id, kind, payload, metadata, &ctx)
+                .await
+                .map(|_| 0),
+            Getdents => {
+                let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
+                    return Err(Error::new(EINVAL));
+                };
+                self.getdents(id, buf, metadata.arg1)
+                    .await
+                    .map(|buf_res| buf_res.finalize())
+            }
+            Fstat => {
+                if payload.len() != size_of::<Stat>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let stat = payload.as_mut_ptr() as *mut Stat;
+                self.fstat(id, unsafe { &mut *stat }, ctx).await.map(|_| 0)
+            }
+            Fstatvfs => {
+                if payload.len() != size_of::<StatVfs>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let stat = payload.as_mut_ptr() as *mut StatVfs;
+                self.fstatvfs(id, unsafe { &mut *stat }, ctx)
+                    .await
+                    .map(|_| 0)
+            }
+            Fsync => self.fsync(id, ctx).await.map(|_| 0),
+            Ftruncate => self.ftruncate(id, metadata.arg1, ctx).await.map(|_| 0),
+            Futimens => {
+                if payload.len() != 2 * size_of::<TimeSpec>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let times = unsafe {
+                    core::slice::from_raw_parts(
+                        payload.as_ptr() as *const TimeSpec,
+                        payload.len() / size_of::<TimeSpec>(),
+                    )
+                };
+                self.futimens(id, times, ctx).await.map(|_| 0)
+            }
+            /* TODO: Support Unlinkat using std_fs_call
+            Unlinkat => self.std_fs_call(fd, payload, metadata, &caller).map(|_| 0)
+            */
+            _ => Err(Error::new(EOPNOTSUPP)),
+        }
     }
 }
 #[allow(unused_variables)]
@@ -1090,8 +1159,9 @@ pub trait SchemeSync {
     fn std_fs_call(
         &mut self,
         id: usize,
+        kind: StdFsCallKind,
         payload: &mut [u8],
-        metadata: &[u64],
+        metadata: StdFsCallMeta,
         ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
     ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
@@ -1136,6 +1206,65 @@ pub trait SchemeSync {
 
     fn on_recvfd(&mut self, recvfd_request: &RecvFdRequest) -> Result<OpenResult> {
         Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn translate_std_fs_call_sync(
+        &mut self,
+        id: usize,
+        kind: StdFsCallKind,
+        payload: &mut [u8],
+        metadata: StdFsCallMeta,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        use syscall::flag::StdFsCallKind::*;
+        match kind {
+            Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).map(|_| 0),
+            // TODO: Handle inside redox-scheme
+            // Since this currently requires get_proc_credentials,
+            // fchown cannot be supported on the redox-scheme side.
+            Fchown => self
+                .std_fs_call(id, kind, payload, metadata, ctx)
+                .map(|_| 0),
+            Getdents => {
+                let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
+                    return Err(Error::new(EINVAL));
+                };
+                self.getdents(id, buf, metadata.arg1)
+                    .map(|buf_res| buf_res.finalize())
+            }
+            Fstat => {
+                if payload.len() != size_of::<Stat>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let stat = payload.as_mut_ptr() as *mut Stat;
+                self.fstat(id, unsafe { &mut *stat }, ctx).map(|_| 0)
+            }
+            Fstatvfs => {
+                if payload.len() != size_of::<StatVfs>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let stat = payload.as_mut_ptr() as *mut StatVfs;
+                self.fstatvfs(id, unsafe { &mut *stat }, ctx).map(|_| 0)
+            }
+            Fsync => self.fsync(id, ctx).map(|_| 0),
+            Ftruncate => self.ftruncate(id, metadata.arg1, ctx).map(|_| 0),
+            Futimens => {
+                if payload.len() != 2 * size_of::<TimeSpec>() {
+                    return Err(Error::new(EINVAL));
+                }
+                let times = unsafe {
+                    core::slice::from_raw_parts(
+                        payload.as_ptr() as *const TimeSpec,
+                        payload.len() / size_of::<TimeSpec>(),
+                    )
+                };
+                self.futimens(id, times, ctx).map(|_| 0)
+            }
+            /* TODO: Support Unlinkat using std_fs_call
+            Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
+            */
+            _ => Err(Error::new(EOPNOTSUPP)),
+        }
     }
 }
 
@@ -1313,10 +1442,36 @@ impl IntoTag for Op {
     }
 }
 
+#[cfg(not(feature = "std"))]
+pub struct SchemeState {}
+#[cfg(not(feature = "std"))]
+impl SchemeState {
+    pub fn new() -> Self {
+        Self {}
+    }
+    fn std_fs_call(
+        &mut self,
+        id: usize,
+        kind: StdFsCallKind,
+        inode: Option<usize>,
+        metadata: StdFsCallMeta,
+        payload: &mut [u8],
+        ctx: &CallerCtx,
+    ) -> Option<SchemeResponse> {
+        None
+    }
+    pub fn on_close(&mut self, id: usize) {}
+
+    pub fn on_detach(&mut self, _id: usize, _inode: usize, _pid: usize) {}
+}
+
+#[cfg(feature = "std")]
+use crate::advisory_flock::{LockError, LockKind, LockOwner, LockSet};
+#[cfg(feature = "std")]
 pub struct SchemeState {
     flocks: LockSet,
 }
-
+#[cfg(feature = "std")]
 impl SchemeState {
     pub fn new() -> Self {
         Self {
@@ -1327,12 +1482,12 @@ impl SchemeState {
     fn std_fs_call(
         &mut self,
         id: usize,
+        kind: StdFsCallKind,
         inode: Option<usize>,
-        metadata: &StdFsCallMeta,
+        metadata: StdFsCallMeta,
         payload: &mut [u8],
         ctx: &CallerCtx,
     ) -> Option<SchemeResponse> {
-        let kind = StdFsCallKind::try_from_raw(metadata.kind).unwrap();
         match kind {
             StdFsCallKind::Lock => Some({
                 let inode = inode?;
@@ -1413,10 +1568,10 @@ impl SchemeState {
                                 pid,
                                 inode: lck_inode,
                             } if pid == ctx.pid && lck_inode == inode => {
-                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))))
+                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))));
                             }
                             LockOwner::Resource { fd } if fd == id => {
-                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))))
+                                return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))));
                             }
                             _ => {}
                         }

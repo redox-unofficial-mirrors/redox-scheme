@@ -9,12 +9,13 @@ use core::mem;
 use core::task::Poll;
 
 use libredox::flag;
-use syscall::error::{Error, Result, EINTR, EWOULDBLOCK};
+use syscall::error::{EINTR, EWOULDBLOCK, Error, Result};
 use syscall::flag::{
     CallFlags, FmoveFdFlags, FobtainFdFlags, RecvFdFlags, SchemeSocketCall, SendFdFlags,
 };
 use syscall::schemev2::{Cqe, CqeOpcode, NewFdFlags, Opcode, Sqe};
 
+#[cfg(feature = "std")]
 pub(crate) mod advisory_flock;
 pub mod scheme;
 
@@ -36,7 +37,7 @@ pub enum OpenResult {
     WouldBlock,
 }
 
-use core::mem::{size_of, MaybeUninit};
+use core::mem::{MaybeUninit, size_of};
 
 use self::scheme::IntoTag;
 
@@ -368,7 +369,7 @@ impl Response {
             flags: CqeOpcode::RespondRegular as u8,
             extra_raw: [0_u8; 3],
             result: Error::mux(status) as u64,
-            tag: req.into_tag().0 .0,
+            tag: req.into_tag().0.0,
         })
     }
 
@@ -377,7 +378,7 @@ impl Response {
             flags: CqeOpcode::RespondAndNotifyOnDetach as u8,
             extra_raw: [0_u8; 3],
             result: Error::mux(status) as u64,
-            tag: req.into_tag().0 .0,
+            tag: req.into_tag().0.0,
         })
     }
 
@@ -399,7 +400,7 @@ impl Response {
             flags: CqeOpcode::RespondWithFd as u8,
             extra_raw: [0_u8; 3],
             result: fd as u64,
-            tag: req.into_tag().0 .0,
+            tag: req.into_tag().0.0,
         })
     }
     pub fn return_external_multiple_fds(num_fds: usize, req: impl IntoTag) -> Self {
@@ -407,7 +408,7 @@ impl Response {
             flags: CqeOpcode::RespondWithMultipleFds as u8,
             extra_raw: [0_u8; 3],
             result: num_fds as u64,
-            tag: req.into_tag().0 .0,
+            tag: req.into_tag().0.0,
         })
     }
     pub fn with_extra(self, extra: [u8; 3]) -> Self {

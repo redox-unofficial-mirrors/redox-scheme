@@ -4,8 +4,8 @@ use std::ops::ControlFlow;
 
 use libredox::error::Error as LError;
 
-use syscall::error::{self as errno, Error, ECANCELED, EIO, EOPNOTSUPP};
 use syscall::Result;
+use syscall::error::{self as errno, ECANCELED, EIO, EOPNOTSUPP, Error};
 
 use crate::scheme::{Op, SchemeResponse, SchemeState, SchemeSync};
 use crate::{CallerCtx, Id, Request, RequestKind, Response, SignalBehavior, Socket};
