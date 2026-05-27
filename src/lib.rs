@@ -126,6 +126,10 @@ impl SendFdRequest {
         self.inner.sqe.args[2]
     }
 
+    pub fn metadata(&self) -> &[u64] {
+        &self.inner.sqe.args[2..3]
+    }
+
     pub fn num_fds(&self) -> usize {
         self.inner.sqe.args[3] as usize
     }
@@ -181,6 +185,10 @@ impl RecvFdRequest {
     }
     pub fn num_fds(&self) -> usize {
         self.inner.sqe.args[2] as usize
+    }
+
+    pub fn metadata(&self) -> &[u64] {
+        &self.inner.sqe.args[3..5]
     }
 
     pub fn move_fd(&self, socket: &Socket, flags: FmoveFdFlags, fds: &[usize]) -> Result<()> {

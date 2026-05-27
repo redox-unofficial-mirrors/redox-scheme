@@ -3,7 +3,7 @@
 use core::fmt::{self, Debug};
 use core::mem::size_of;
 use syscall::dirent::DirentBuf;
-use syscall::schemev2::{Opcode, Sqe};
+use syscall::schemev2::{Opcode, Sqe, SqeFlags};
 use syscall::{Stat, StatVfs, StdFsCallMeta, TimeSpec, error::*, flag::*};
 
 use crate::{
@@ -58,11 +58,27 @@ impl<Flags: Debug> Debug for OpFdPathLike<Flags> {
 
 pub struct OpCall {
     req: Tag,
-    pub fd: usize,
+    fds: [usize; 2],
+    num_fds: usize,
     payload: *mut [u8], // &req
     metadata: [u64; 3],
 }
 impl OpCall {
+    pub fn fd(&self) -> usize {
+        *self.fds().first().expect("There is no target id")
+    }
+    pub fn fds(&self) -> &[usize] {
+        &self.fds[..self.num_fds]
+    }
+    pub fn fds_and_payload_and_metadata(&mut self) -> (&[usize], &mut [u8], &[u64]) {
+        unsafe {
+            (
+                &self.fds[..self.num_fds],
+                &mut *self.payload,
+                &self.metadata,
+            )
+        }
+    }
     pub fn payload_and_metadata(&mut self) -> (&mut [u8], &[u64]) {
         // SAFETY: borrows &self.req
         unsafe { (&mut *self.payload, &self.metadata) }
@@ -77,7 +93,7 @@ impl OpCall {
 impl Debug for OpCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpCall")
-            .field("fd", &self.fd)
+            .field("fd", &self.fds())
             // TODO: debug first and last few bytes, collapse middle to ...
             .field("payload", &self.payload)
             .field("metadata", &self.metadata())
@@ -240,7 +256,7 @@ impl Op {
         let opcode = Opcode::try_from_raw(sqe.opcode)?;
         let args = sqe.args;
 
-        let [a, b, c, d, e, _f] = args.map(|a| a as usize);
+        let [a, b, c, d, e, f] = args.map(|a| a as usize);
         use core::{slice, str};
 
         Some(match opcode {
@@ -249,7 +265,9 @@ impl Op {
                 fcntl_flags: e as u32,
                 inner: OpPathLike {
                     req,
-                    path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                    path: unsafe {
+                        str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c))
+                    },
                     flags: d,
                 },
             }),
@@ -258,26 +276,28 @@ impl Op {
                 fcntl_flags: 0,
                 inner: OpPathLike {
                     req,
-                    path: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                    path: unsafe {
+                        str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c))
+                    },
                     flags: d,
                 },
             }),
             Opcode::Dup => Op::Dup(OpQueryWrite {
                 req,
                 fd: a,
-                buf: slice::from_raw_parts(b as *const u8, c),
+                buf: unsafe { slice::from_raw_parts(b as *const u8, c) },
             }),
             Opcode::Read => Op::Read(OpRead {
                 req,
                 fd: a,
-                buf: slice::from_raw_parts_mut(b as *mut u8, c),
+                buf: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
                 offset: args[3],
                 flags: args[4] as u32,
             }),
             Opcode::Write => Op::Write(OpWrite {
                 req,
                 fd: a,
-                buf: slice::from_raw_parts(b as *const u8, c),
+                buf: unsafe { slice::from_raw_parts(b as *const u8, c) },
                 offset: args[3],
                 flags: args[4] as u32,
             }),
@@ -309,24 +329,24 @@ impl Op {
             Opcode::Flink => Op::Flink(OpQueryWrite {
                 req,
                 fd: a,
-                buf: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                buf: unsafe { str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)) },
             }),
             Opcode::Fpath => Op::Fpath(OpQueryRead {
                 req,
                 fd: a,
-                buf: slice::from_raw_parts_mut(b as *mut u8, c),
+                buf: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
             }),
             Opcode::Frename => Op::Frename(OpQueryWrite {
                 req,
                 fd: a,
-                buf: str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)),
+                buf: unsafe { str::from_utf8_unchecked(slice::from_raw_parts(b as *const u8, c)) },
             }),
             Opcode::Fstat => {
                 assert!(c >= size_of::<Stat>());
                 Op::Fstat(OpQueryRead {
                     req,
                     fd: a,
-                    buf: &mut *(b as *mut Stat),
+                    buf: unsafe { &mut *(b as *mut Stat) },
                 })
             }
             Opcode::Fstatvfs => {
@@ -334,7 +354,7 @@ impl Op {
                 Op::FstatVfs(OpQueryRead {
                     req,
                     fd: a,
-                    buf: &mut *(b as *mut StatVfs),
+                    buf: unsafe { &mut *(b as *mut StatVfs) },
                 })
             }
             Opcode::Fsync => Op::Fsync { req, fd: a },
@@ -348,26 +368,54 @@ impl Op {
                 Op::Futimens(OpQueryWrite {
                     req,
                     fd: a,
-                    buf: slice::from_raw_parts(b as *const TimeSpec, c / size_of::<TimeSpec>()),
+                    buf: unsafe {
+                        slice::from_raw_parts(b as *const TimeSpec, c / size_of::<TimeSpec>())
+                    },
                 })
             }
 
-            Opcode::Call => Op::Call(OpCall {
-                req,
-                fd: a,
-                payload: slice::from_raw_parts_mut(b as *mut u8, c),
-                metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
-            }),
-            Opcode::StdFsCall => Op::StdFsCall(OpCall {
-                req,
-                fd: a,
-                payload: slice::from_raw_parts_mut(b as *mut u8, c),
-                metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
-            }),
+            Opcode::Call => {
+                if sqe.sqe_flags.contains(SqeFlags::MULTIPLE_IDS) {
+                    Op::Call(OpCall {
+                        req,
+                        fds: [a, f],
+                        num_fds: 2,
+                        payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
+                        metadata: [sqe.args[3], sqe.args[4], 0],
+                    })
+                } else {
+                    Op::Call(OpCall {
+                        req,
+                        fds: [a, 0],
+                        num_fds: 1,
+                        payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
+                        metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
+                    })
+                }
+            }
+            Opcode::StdFsCall => {
+                if sqe.sqe_flags.contains(SqeFlags::MULTIPLE_IDS) {
+                    Op::StdFsCall(OpCall {
+                        req,
+                        fds: [a, f],
+                        num_fds: 2,
+                        payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
+                        metadata: [sqe.args[3], sqe.args[4], 0],
+                    })
+                } else {
+                    Op::StdFsCall(OpCall {
+                        req,
+                        fds: [a, 0],
+                        num_fds: 1,
+                        payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
+                        metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
+                    })
+                }
+            }
             Opcode::Getdents => Op::Getdents(OpGetdents {
                 req,
                 fd: a,
-                buf: slice::from_raw_parts_mut(b as *mut u8, c),
+                buf: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
                 header_size: sqe.args[3] as u16,
                 opaque_offset: sqe.args[4],
             }),
@@ -421,8 +469,8 @@ impl Op {
             Op::Fstat(op) => op.fd,
             Op::FstatVfs(op) => op.fd,
             Op::Futimens(op) => op.fd,
-            Op::Call(op) => op.fd,
-            Op::StdFsCall(op) => op.fd,
+            Op::Call(op) => op.fd(),
+            Op::StdFsCall(op) => op.fd(),
             Op::Getdents(op) => op.fd,
             Op::Recvfd(req) => req.id(),
         })
@@ -596,14 +644,17 @@ impl Op {
             } => s.munmap(fd, offset, len, flags, &caller).map(|()| 0).into(),
 
             Op::Call(ref mut req) => {
-                let fd = req.fd;
-                let (payload, metadata) = req.payload_and_metadata();
-                s.call(fd, payload, metadata, &caller).into()
+                let (fds, payload, metadata) = req.fds_and_payload_and_metadata();
+                if fds.len() >= 2 {
+                    s.call_multiple_ids(fds, payload, metadata, &caller).into()
+                } else {
+                    s.call(fds[0], payload, metadata, &caller).into()
+                }
             }
 
             Op::StdFsCall(ref mut req) => {
-                let fd = req.fd;
-                let (payload, metadata) = req.payload_and_metadata();
+                let fd = req.fd();
+                let (fds, payload, metadata) = req.fds_and_payload_and_metadata();
                 let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
                     return Err(Error::new(EOPNOTSUPP)).into();
                 };
@@ -618,7 +669,7 @@ impl Op {
                 ) {
                     return resp;
                 } else {
-                    s.translate_std_fs_call_sync(fd, kind, payload, std_fs_call_meta, &caller)
+                    s.translate_std_fs_call(fds, kind, payload, std_fs_call_meta, &caller)
                         .into()
                 }
             }
@@ -746,14 +797,19 @@ impl Op {
             ),
 
             Op::Call(mut req) => {
-                let fd = req.fd;
-                let (payload, metadata) = req.payload_and_metadata();
-                (s.call(fd, payload, metadata, &caller).await, req.into_tag())
+                let (fds, payload, metadata) = req.fds_and_payload_and_metadata();
+                let res = if fds.len() >= 2 {
+                    s.call_multiple_ids(fds, payload, metadata, &caller).await
+                } else {
+                    s.call(fds[0], payload, metadata, &caller).await
+                };
+
+                (res, req.into_tag())
             }
 
             Op::StdFsCall(mut req) => {
-                let fd = req.fd;
-                let (payload, metadata) = req.payload_and_metadata();
+                let fd = req.fd();
+                let (fds, payload, metadata) = req.fds_and_payload_and_metadata();
                 let Some(kind) = StdFsCallKind::try_from_raw(metadata[0] as u8) else {
                     return Response::err(EOPNOTSUPP, req);
                 };
@@ -775,7 +831,7 @@ impl Op {
                     }
                 } else {
                     (
-                        s.translate_std_fs_call_async(fd, kind, payload, std_fs_call_meta, &caller)
+                        s.translate_std_fs_call(fds, kind, payload, std_fs_call_meta, &caller)
                             .await,
                         req.into_tag(),
                     )
@@ -923,9 +979,29 @@ pub trait SchemeAsync {
         Err(Error::new(EBADF))
     }
 
+    async fn relpathat(
+        &mut self,
+        id: usize,
+        dir_id: usize,
+        path: &mut [u8],
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+
     async fn call(
         &mut self,
         id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    async fn call_multiple_ids(
+        &mut self,
+        ids: &[usize],
         payload: &mut [u8],
         metadata: &[u64],
         ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
@@ -979,9 +1055,9 @@ pub trait SchemeAsync {
         Err(Error::new(EOPNOTSUPP))
     }
 
-    async fn translate_std_fs_call_async(
+    async fn translate_std_fs_call(
         &mut self,
-        id: usize,
+        ids: &[usize],
         kind: StdFsCallKind,
         payload: &mut [u8],
         metadata: StdFsCallMeta,
@@ -989,56 +1065,70 @@ pub trait SchemeAsync {
     ) -> Result<usize> {
         use syscall::flag::StdFsCallKind::*;
         match kind {
-            Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).await.map(|_| 0),
-            // TODO: Handle inside redox-scheme
-            // Since this currently requires get_proc_credentials,
-            // fchown cannot be supported on the redox-scheme side.
-            Fchown => self
-                .std_fs_call(id, kind, payload, metadata, &ctx)
-                .await
-                .map(|_| 0),
-            Getdents => {
-                let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
+            Relpathat => {
+                let (Some(target_id), Some(dir_id)) = (ids.first(), ids.get(1)) else {
                     return Err(Error::new(EINVAL));
                 };
-                self.getdents(id, buf, metadata.arg1)
-                    .await
-                    .map(|buf_res| buf_res.finalize())
+                self.relpathat(*target_id, *dir_id, payload, ctx).await
             }
-            Fstat => {
-                if payload.len() != size_of::<Stat>() {
+            _ => {
+                if ids.len() != 1 {
                     return Err(Error::new(EINVAL));
                 }
-                let stat = payload.as_mut_ptr() as *mut Stat;
-                self.fstat(id, unsafe { &mut *stat }, ctx).await.map(|_| 0)
-            }
-            Fstatvfs => {
-                if payload.len() != size_of::<StatVfs>() {
-                    return Err(Error::new(EINVAL));
+                let id = ids[0];
+                match kind {
+                    Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).await.map(|_| 0),
+                    // TODO: Handle inside redox-scheme
+                    // Since this currently requires get_proc_credentials,
+                    // fchown cannot be supported on the redox-scheme side.
+                    Fchown => self
+                        .std_fs_call(id, kind, payload, metadata, ctx)
+                        .await
+                        .map(|_| 0),
+                    Getdents => {
+                        let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
+                            return Err(Error::new(EINVAL));
+                        };
+                        self.getdents(id, buf, metadata.arg1)
+                            .await
+                            .map(|buf_res| buf_res.finalize())
+                    }
+                    Fstat => {
+                        if payload.len() != size_of::<Stat>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let stat = payload.as_mut_ptr() as *mut Stat;
+                        self.fstat(id, unsafe { &mut *stat }, ctx).await.map(|_| 0)
+                    }
+                    Fstatvfs => {
+                        if payload.len() != size_of::<StatVfs>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let stat = payload.as_mut_ptr() as *mut StatVfs;
+                        self.fstatvfs(id, unsafe { &mut *stat }, ctx)
+                            .await
+                            .map(|_| 0)
+                    }
+                    Fsync => self.fsync(id, ctx).await.map(|_| 0),
+                    Ftruncate => self.ftruncate(id, metadata.arg1, ctx).await.map(|_| 0),
+                    Futimens => {
+                        if payload.len() != 2 * size_of::<TimeSpec>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let times = unsafe {
+                            core::slice::from_raw_parts(
+                                payload.as_ptr() as *const TimeSpec,
+                                payload.len() / size_of::<TimeSpec>(),
+                            )
+                        };
+                        self.futimens(id, times, ctx).await.map(|_| 0)
+                    }
+                    /* TODO: Support Unlinkat using std_fs_call
+                    Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
+                    */
+                    _ => Err(Error::new(EOPNOTSUPP)),
                 }
-                let stat = payload.as_mut_ptr() as *mut StatVfs;
-                self.fstatvfs(id, unsafe { &mut *stat }, ctx)
-                    .await
-                    .map(|_| 0)
             }
-            Fsync => self.fsync(id, ctx).await.map(|_| 0),
-            Ftruncate => self.ftruncate(id, metadata.arg1, ctx).await.map(|_| 0),
-            Futimens => {
-                if payload.len() != 2 * size_of::<TimeSpec>() {
-                    return Err(Error::new(EINVAL));
-                }
-                let times = unsafe {
-                    core::slice::from_raw_parts(
-                        payload.as_ptr() as *const TimeSpec,
-                        payload.len() / size_of::<TimeSpec>(),
-                    )
-                };
-                self.futimens(id, times, ctx).await.map(|_| 0)
-            }
-            /* TODO: Support Unlinkat using std_fs_call
-            Unlinkat => self.std_fs_call(fd, payload, metadata, &caller).map(|_| 0)
-            */
-            _ => Err(Error::new(EOPNOTSUPP)),
         }
     }
 }
@@ -1146,9 +1236,29 @@ pub trait SchemeSync {
         Err(Error::new(EBADF))
     }
 
+    fn relpathat(
+        &mut self,
+        id: usize,
+        dir_id: usize,
+        path: &mut [u8],
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        Err(Error::new(EBADF))
+    }
+
     fn call(
         &mut self,
         id: usize,
+        payload: &mut [u8],
+        metadata: &[u64],
+        ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn call_multiple_ids(
+        &mut self,
+        ids: &[usize],
         payload: &mut [u8],
         metadata: &[u64],
         ctx: &CallerCtx, // Only pid and id are correct here, uid/gid are not used
@@ -1208,9 +1318,9 @@ pub trait SchemeSync {
         Err(Error::new(EOPNOTSUPP))
     }
 
-    fn translate_std_fs_call_sync(
+    fn translate_std_fs_call(
         &mut self,
-        id: usize,
+        ids: &[usize],
         kind: StdFsCallKind,
         payload: &mut [u8],
         metadata: StdFsCallMeta,
@@ -1218,52 +1328,66 @@ pub trait SchemeSync {
     ) -> Result<usize> {
         use syscall::flag::StdFsCallKind::*;
         match kind {
-            Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).map(|_| 0),
-            // TODO: Handle inside redox-scheme
-            // Since this currently requires get_proc_credentials,
-            // fchown cannot be supported on the redox-scheme side.
-            Fchown => self
-                .std_fs_call(id, kind, payload, metadata, ctx)
-                .map(|_| 0),
-            Getdents => {
-                let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
-                    return Err(Error::new(EINVAL));
-                };
-                self.getdents(id, buf, metadata.arg1)
-                    .map(|buf_res| buf_res.finalize())
-            }
-            Fstat => {
-                if payload.len() != size_of::<Stat>() {
+            Relpathat => {
+                if ids.len() != 2 {
                     return Err(Error::new(EINVAL));
                 }
-                let stat = payload.as_mut_ptr() as *mut Stat;
-                self.fstat(id, unsafe { &mut *stat }, ctx).map(|_| 0)
+                self.relpathat(ids[0], ids[1], payload, ctx)
             }
-            Fstatvfs => {
-                if payload.len() != size_of::<StatVfs>() {
+            _ => {
+                if ids.len() != 1 {
                     return Err(Error::new(EINVAL));
                 }
-                let stat = payload.as_mut_ptr() as *mut StatVfs;
-                self.fstatvfs(id, unsafe { &mut *stat }, ctx).map(|_| 0)
-            }
-            Fsync => self.fsync(id, ctx).map(|_| 0),
-            Ftruncate => self.ftruncate(id, metadata.arg1, ctx).map(|_| 0),
-            Futimens => {
-                if payload.len() != 2 * size_of::<TimeSpec>() {
-                    return Err(Error::new(EINVAL));
+                let id = ids[0];
+                match kind {
+                    Fchmod => self.fchmod(id, metadata.arg1 as u16, ctx).map(|_| 0),
+                    // TODO: Handle inside redox-scheme
+                    // Since this currently requires get_proc_credentials,
+                    // fchown cannot be supported on the redox-scheme side.
+                    Fchown => self
+                        .std_fs_call(id, kind, payload, metadata, ctx)
+                        .map(|_| 0),
+                    Getdents => {
+                        let Some(buf) = DirentBuf::new(payload, metadata.arg2 as u16) else {
+                            return Err(Error::new(EINVAL));
+                        };
+                        self.getdents(id, buf, metadata.arg1)
+                            .map(|buf_res| buf_res.finalize())
+                    }
+                    Fstat => {
+                        if payload.len() != size_of::<Stat>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let stat = payload.as_mut_ptr() as *mut Stat;
+                        self.fstat(id, unsafe { &mut *stat }, ctx).map(|_| 0)
+                    }
+                    Fstatvfs => {
+                        if payload.len() != size_of::<StatVfs>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let stat = payload.as_mut_ptr() as *mut StatVfs;
+                        self.fstatvfs(id, unsafe { &mut *stat }, ctx).map(|_| 0)
+                    }
+                    Fsync => self.fsync(id, ctx).map(|_| 0),
+                    Ftruncate => self.ftruncate(id, metadata.arg1, ctx).map(|_| 0),
+                    Futimens => {
+                        if payload.len() != 2 * size_of::<TimeSpec>() {
+                            return Err(Error::new(EINVAL));
+                        }
+                        let times = unsafe {
+                            core::slice::from_raw_parts(
+                                payload.as_ptr() as *const TimeSpec,
+                                payload.len() / size_of::<TimeSpec>(),
+                            )
+                        };
+                        self.futimens(id, times, ctx).map(|_| 0)
+                    }
+                    /* TODO: Support Unlinkat using std_fs_call
+                    Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
+                    */
+                    _ => Err(Error::new(EOPNOTSUPP)),
                 }
-                let times = unsafe {
-                    core::slice::from_raw_parts(
-                        payload.as_ptr() as *const TimeSpec,
-                        payload.len() / size_of::<TimeSpec>(),
-                    )
-                };
-                self.futimens(id, times, ctx).map(|_| 0)
             }
-            /* TODO: Support Unlinkat using std_fs_call
-            Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
-            */
-            _ => Err(Error::new(EOPNOTSUPP)),
         }
     }
 }
