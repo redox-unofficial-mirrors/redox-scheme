@@ -16,5 +16,5 @@ default = ["std"]
 std = []
 
 [dependencies]
-redox_syscall = "0.8.0"
-libredox = { version = "0.1.17", default-features = false, features = ["redox_syscall", "call"] }
+redox_syscall = "0.9.0"
+libredox = { version = "0.1.18", default-features = false, features = ["redox_syscall", "call"] }

@@ -264,10 +264,10 @@ impl Socket {
             flags |= flag::O_NONBLOCK;
         }
 
-        let fd = syscall::dup(cap_fd, b"create-scheme")?;
-        syscall::fcntl(fd, syscall::F_SETFD, flag::O_CLOEXEC as usize)?;
+        let fd = libredox::call::dup(cap_fd, b"create-scheme")?;
+        libredox::call::fcntl(fd, syscall::F_SETFD, flag::O_CLOEXEC as usize)?;
 
-        syscall::fcntl(fd, syscall::F_SETFL, flags as usize)?;
+        libredox::call::fcntl(fd, syscall::F_SETFL, flags as usize)?;
         Ok(Self {
             inner: libredox::Fd::new(fd),
         })
@@ -314,12 +314,25 @@ impl Socket {
         // NOTE: error only allowed to occur if nothing was written
         let n = unsafe { write_responses(self.inner.raw(), slice, behavior)? };
         assert!(buf.len() >= n);
+
+        for resp in buf.iter().take(n) {
+            if resp.0.flags == CqeOpcode::RespondWithFd as u8 {
+                let fd = resp.0.result as usize;
+                let _ = libredox::call::close(fd);
+            }
+        }
+
         buf.drain(..n).for_each(core::mem::forget);
 
         Ok(())
     }
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
-        Ok(unsafe { write_responses(self.inner.raw(), &[resp], behavior)? } > 0)
+        let success = unsafe { write_responses(self.inner.raw(), &[resp], behavior)? } > 0;
+        if success && resp.0.flags == CqeOpcode::RespondWithFd as u8 {
+            let fd = resp.0.result as usize;
+            let _ = libredox::call::close(fd);
+        }
+        Ok(success)
     }
     pub fn inner(&self) -> &libredox::Fd {
         &self.inner
