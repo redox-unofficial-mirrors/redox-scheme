@@ -1590,16 +1590,16 @@ impl SchemeState {
 }
 
 #[cfg(feature = "std")]
-use crate::advisory_flock::{LockError, LockKind, LockOwner, LockSet};
+use crate::advisory_flock::{LockError, LockKind, LockOwner, LockTarget, MountLockSet};
 #[cfg(feature = "std")]
 pub struct SchemeState {
-    flocks: LockSet,
+    flocks: MountLockSet,
 }
 #[cfg(feature = "std")]
 impl SchemeState {
     pub fn new() -> Self {
         Self {
-            flocks: LockSet::new(),
+            flocks: MountLockSet::new(),
         }
     }
 
@@ -1615,15 +1615,13 @@ impl SchemeState {
         match kind {
             StdFsCallKind::Lock => Some({
                 let inode = inode?;
-                let (owner, start, len, kind) = (
+                let (owner, target, start, len, kind) = (
                     if metadata.arg1 & (1 << 63) == (1 << 63) {
                         LockOwner::Resource { fd: id }
                     } else {
-                        LockOwner::Process {
-                            pid: ctx.pid,
-                            inode,
-                        }
+                        LockOwner::Process { pid: ctx.pid }
                     },
+                    LockTarget::Inode { inode: inode },
                     (metadata.arg1 & !(1 << 63)),
                     (metadata.arg2 & !(1 << 63)),
                     if metadata.arg2 & (1 << 63) == (1 << 63) {
@@ -1633,7 +1631,7 @@ impl SchemeState {
                     },
                 );
 
-                match self.flocks.lock(kind, owner, start, len) {
+                match self.flocks.lock(kind, owner, target, start, len) {
                     Ok(()) if owner.is_process() => SchemeResponse::RegularAndNotifyOnDetach(Ok(0)),
                     Ok(()) if !owner.is_process() => SchemeResponse::Regular(Ok(0)),
                     Err(LockError::Conflict) => {
@@ -1645,36 +1643,32 @@ impl SchemeState {
 
             StdFsCallKind::Unlock => Some({
                 let inode = inode?;
-                let (owner, start, len) = (
+                let (owner, target, start, len) = (
                     if metadata.arg1 & (1 << 63) == (1 << 63) {
                         LockOwner::Resource { fd: id }
                     } else {
-                        LockOwner::Process {
-                            pid: ctx.pid,
-                            inode,
-                        }
+                        LockOwner::Process { pid: ctx.pid }
                     },
+                    LockTarget::Inode { inode: inode },
                     (metadata.arg1 & !(1 << 63)),
                     metadata[2],
                 );
 
-                match self.flocks.unlock(owner, start, len) {
-                    Ok(()) | Err(LockError::NotPresent) => SchemeResponse::Regular(Ok(0)),
+                match self.flocks.unlock(owner, target, start, len) {
+                    Ok(()) => SchemeResponse::Regular(Ok(0)),
                     _ => unreachable!(),
                 }
             }),
 
             StdFsCallKind::GetLock => Some({
                 let inode = inode?;
-                let (owner, start, len, kind) = (
+                let (owner, target, start, len, kind) = (
                     if metadata.arg1 & (1 << 63) == (1 << 63) {
                         LockOwner::Resource { fd: id }
                     } else {
-                        LockOwner::Process {
-                            pid: ctx.pid,
-                            inode,
-                        }
+                        LockOwner::Process { pid: ctx.pid }
                     },
+                    LockTarget::Inode { inode: inode },
                     (metadata.arg1 & !(1 << 63)),
                     (metadata.arg2 & !(1 << 63)),
                     if metadata.arg2 & (1 << 63) == (1 << 63) {
@@ -1683,15 +1677,12 @@ impl SchemeState {
                         LockKind::Shared
                     },
                 );
-                match self.flocks.get_lock(kind, owner, start, len) {
+                match self.flocks.get_lock(kind, owner, target, start, len) {
                     Some(lck) => {
                         assert!(payload.len() == size_of::<u64>() * 2);
 
                         match lck.owner {
-                            LockOwner::Process {
-                                pid,
-                                inode: lck_inode,
-                            } if pid == ctx.pid && lck_inode == inode => {
+                            LockOwner::Process { pid } if pid == ctx.pid => {
                                 return Some(SchemeResponse::Regular(Err(Error::new(ESRCH))));
                             }
                             LockOwner::Resource { fd } if fd == id => {
@@ -1718,11 +1709,15 @@ impl SchemeState {
         }
     }
 
-    pub fn on_close(&mut self, id: usize) {
-        let _ = self.flocks.on_close(LockOwner::Resource { fd: id });
-    }
+    pub fn on_close(&mut self, _id: usize) {}
 
-    pub fn on_detach(&mut self, _id: usize, inode: usize, pid: usize) {
-        let _ = self.flocks.on_close(LockOwner::Process { pid, inode });
+    pub fn on_detach(&mut self, id: usize, inode: usize, pid: usize) {
+        // Remove both F_SETLK locks for the pid and F_ORD_SETLK locks
+        // for the file descriptor, as we have no way of knowing which
+        // might have been used.
+        self.flocks
+            .unlock_all(LockOwner::Resource { fd: id }, LockTarget::Inode { inode });
+        self.flocks
+            .unlock_all(LockOwner::Process { pid }, LockTarget::Inode { inode });
     }
 }

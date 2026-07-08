@@ -1,5 +1,6 @@
 // Missing: F_SETLKW, F_OFD_SETLKW, and deadlock-detection
 
+use std::collections::BTreeMap;
 use std::collections::LinkedList;
 
 const OFFSET_MAX: u64 = i64::MAX as u64;
@@ -16,7 +17,86 @@ fn span_end(start: u64, len: u64) -> Result<u64, LockError> {
 }
 
 #[derive(Debug)]
-pub struct LockSet {
+pub struct MountLockSet {
+    file_locks: BTreeMap<LockTarget, LockSet>,
+}
+
+impl MountLockSet {
+    pub fn new() -> Self {
+        Self {
+            file_locks: BTreeMap::new(),
+        }
+    }
+
+    pub fn lock(
+        &mut self,
+        kind: LockKind,
+        owner: LockOwner,
+        target: LockTarget,
+        start: u64,
+        len: u64,
+    ) -> Result<(), LockError> {
+        match self.file_locks.get_mut(&target) {
+            Some(locks) => locks.lock(kind, owner, start, len),
+            None => {
+                let mut locks = LockSet::new();
+                let ret = locks.lock(kind, owner, start, len);
+                assert!(ret.is_ok()); // tree was empty, no contention
+                assert!(!locks.is_empty());
+                self.file_locks.insert(target, locks);
+                ret
+            }
+        }
+    }
+
+    pub fn unlock(
+        &mut self,
+        owner: LockOwner,
+        target: LockTarget,
+        start: u64,
+        len: u64,
+    ) -> Result<(), LockError> {
+        let mut rem_locks = false;
+        let ret = match self.file_locks.get_mut(&target) {
+            Some(locks) => {
+                let ret = locks.unlock(owner, start, len);
+                rem_locks = locks.is_empty();
+                ret
+            }
+            None => Ok(()),
+        };
+
+        if rem_locks {
+            self.file_locks.remove(&target);
+        }
+
+        ret
+    }
+
+    pub fn get_lock(
+        &self,
+        kind: LockKind,
+        owner: LockOwner,
+        target: LockTarget,
+        start: u64,
+        len: u64,
+    ) -> Option<&Lock> {
+        // Can't use map() here because get_lock() can return None
+        match self.file_locks.get(&target) {
+            Some(locks) => locks.get_lock(kind, owner, start, len),
+            None => None,
+        }
+    }
+
+    pub fn unlock_all(&mut self, owner: LockOwner, target: LockTarget) {
+        let ret = self.unlock(owner, target, 0, OFFSET_MAX + 1);
+        // only possible error on unlock is passing an invalid range
+        assert!(ret.is_ok());
+    }
+}
+
+#[derive(Debug)]
+struct LockSet {
     list: LinkedList<Lock>,
 }
 
@@ -25,6 +105,10 @@ impl LockSet {
         Self {
             list: LinkedList::new(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
     }
 
     /// # Note
@@ -121,10 +205,9 @@ impl LockSet {
         }
 
         if cursor.current().is_none() {
-            return Err(LockError::NotPresent);
+            return Ok(());
         }
 
-        let mut success = false;
         while let Some(curr) = cursor.current()
             && curr.owner == owner
         {
@@ -138,7 +221,6 @@ impl LockSet {
                 break;
             }
 
-            success = true;
             if start <= curr.start && end >= curr.end {
                 // Unlock range covers the entire lock. Cursor is moved to point
                 // to the next element by `remove_cursor`
@@ -161,15 +243,13 @@ impl LockSet {
             cursor.move_next();
         }
 
-        if success {
-            Ok(())
-        } else {
-            Err(LockError::NotPresent)
-        }
+        // Unlocking an already unlocked lock in POSIX semantics is
+        // allowed, so we always succeed.
+        Ok(())
     }
 
     pub fn get_lock(
-        &mut self,
+        &self,
         kind: LockKind,
         owner: LockOwner,
         start: u64,
@@ -178,32 +258,11 @@ impl LockSet {
         let query = Lock::new(kind, owner, start, start + (len - 1));
         self.list.iter().find(|lck| lck.overlaps_with(&query))
     }
-
-    /// `info` should be `None` for OFD-owned locks.
-    pub fn on_close(&mut self, owner: LockOwner) -> Result<(), LockError> {
-        let mut cursor = self.list.cursor_front_mut();
-        while let Some(curr) = cursor.current() {
-            // Closing any file descriptor drops all POSIX locks that the process holds on that
-            // file, even if the lock was originally acquired using a different file
-            // descriptor.
-            let should_remove = owner == curr.owner;
-
-            if should_remove {
-                cursor.remove_current();
-                return Ok(());
-            } else {
-                cursor.move_next();
-            }
-        }
-
-        Err(LockError::NotPresent)
-    }
 }
 
 #[derive(Debug, PartialEq)]
 pub enum LockError {
     Conflict,
-    NotPresent,
     Overflow,
 }
 
@@ -249,7 +308,7 @@ impl Lock {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum LockOwner {
-    Process { pid: usize, inode: usize },
+    Process { pid: usize },
     Resource { fd: usize },
 }
 
@@ -257,6 +316,13 @@ impl LockOwner {
     pub fn is_process(&self) -> bool {
         matches!(self, Self::Process { .. })
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LockTarget {
+    Inode { inode: usize },
+    // TODO add something to uniquely identify a file
+    // for filesystems where the inode is not set.
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -279,13 +345,8 @@ mod tests {
     fn mixed_owners() {
         let mut set = LockSet::new();
         assert!(
-            set.lock(
-                LockKind::Exclusive,
-                LockOwner::Process { pid: 1, inode: 1 },
-                0,
-                2
-            )
-            .is_ok()
+            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 2)
+                .is_ok()
         );
         // According to POSIX Issue 8, an **exclusive** process or OFD-owned
         // lock prevents any **other** process or OFD-owned lock from being
@@ -300,43 +361,23 @@ mod tests {
         );
 
         assert!(
-            !set.lock(
-                LockKind::Shared,
-                LockOwner::Process { pid: 2, inode: 2 },
-                0,
-                2
-            )
-            .is_ok()
+            !set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 0, 2)
+                .is_ok()
         );
         assert!(
-            !set.lock(
-                LockKind::Exclusive,
-                LockOwner::Process { pid: 2, inode: 2 },
-                0,
-                2
-            )
-            .is_ok()
+            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 0, 2)
+                .is_ok()
         );
         // Similarly, a **shared** process or OFD-owned lock prevents any
         // **other exclusive** process or OFD-owned lock from being placed on
         // any overlapping byte range.
         assert!(
-            set.lock(
-                LockKind::Shared,
-                LockOwner::Process { pid: 1, inode: 1 },
-                2,
-                2
-            )
-            .is_ok()
+            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 2, 2)
+                .is_ok()
         );
         assert!(
-            !set.lock(
-                LockKind::Exclusive,
-                LockOwner::Process { pid: 2, inode: 2 },
-                2,
-                2
-            )
-            .is_ok()
+            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 2, 2)
+                .is_ok()
         );
         assert!(
             !set.lock(LockKind::Exclusive, LockOwner::Resource { fd: 1 }, 2, 2)
@@ -346,13 +387,8 @@ mod tests {
         // **other shared** process or OFD-owned lock from being placed on any
         // overlapping byte range.
         assert!(
-            set.lock(
-                LockKind::Shared,
-                LockOwner::Process { pid: 2, inode: 2 },
-                2,
-                2
-            )
-            .is_ok()
+            set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 2, 2)
+                .is_ok()
         );
         assert!(
             set.lock(LockKind::Shared, LockOwner::Resource { fd: 1 }, 2, 2)
@@ -364,52 +400,15 @@ mod tests {
     fn same_owner() {
         let mut set = LockSet::new();
         assert!(
-            set.lock(
-                LockKind::Exclusive,
-                LockOwner::Process { pid: 1, inode: 1 },
-                0,
-                8
-            )
-            .is_ok()
+            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 8)
+                .is_ok()
         );
         // Requests from the **same** owner as the existing lock are allowed.
         assert!(
-            set.lock(
-                LockKind::Shared,
-                LockOwner::Process { pid: 1, inode: 1 },
-                4,
-                4
-            )
-            .is_ok()
-        );
-        assert!(
-            set.unlock(LockOwner::Process { pid: 1, inode: 1 }, 4, 8)
+            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 4, 4)
                 .is_ok()
         );
-        assert!(
-            set.unlock(LockOwner::Process { pid: 1, inode: 1 }, 0, 8)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_on_close() {
-        let mut set = LockSet::new();
-        assert!(
-            set.lock(
-                LockKind::Exclusive,
-                LockOwner::Process { pid: 1, inode: 1 },
-                0,
-                10
-            )
-            .is_ok()
-        );
-        assert!(
-            set.on_close(LockOwner::Process { pid: 1, inode: 1 })
-                .is_ok()
-        );
-        assert!(
-            set.on_close(LockOwner::Process { pid: 1, inode: 1 }) == Err(LockError::NotPresent)
-        );
+        assert!(set.unlock(LockOwner::Process { pid: 1 }, 4, 8).is_ok());
+        assert!(set.unlock(LockOwner::Process { pid: 1 }, 0, 8).is_ok());
     }
 }
