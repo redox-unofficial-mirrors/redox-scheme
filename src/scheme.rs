@@ -1473,6 +1473,31 @@ macro_rules! trivial_into {
     }
 }
 trivial_into![OpCall, OpRead, OpWrite, OpGetdents,];
+
+macro_rules! trivial_unsafe_impl_send_sync {
+    ($($t:ident),* $(,)?) => {
+        $(
+            unsafe impl Send for $t {}
+            unsafe impl Sync for $t {}
+        )*
+    };
+}
+// # Safety
+//
+// Op instances are only valid while processing syscall requests.
+trivial_unsafe_impl_send_sync![OpCall, OpRead, OpWrite, OpGetdents,];
+unsafe impl<T: ?Sized> Send for OpQueryWrite<T> {}
+unsafe impl<T: ?Sized> Sync for OpQueryWrite<T> {}
+
+unsafe impl<T: ?Sized> Send for OpQueryRead<T> {}
+unsafe impl<T: ?Sized> Sync for OpQueryRead<T> {}
+
+unsafe impl<Flags> Send for OpFdPathLike<Flags> {}
+unsafe impl<Flags> Sync for OpFdPathLike<Flags> {}
+
+unsafe impl<Flags> Send for OpPathLike<Flags> {}
+unsafe impl<Flags> Sync for OpPathLike<Flags> {}
+
 impl<T: ?Sized> IntoTag for OpQueryWrite<T> {
     fn into_tag(self) -> Tag {
         self.req
