@@ -89,7 +89,7 @@ impl MountLockSet {
     }
 
     pub fn unlock_all(&mut self, owner: LockOwner, target: LockTarget) {
-        let ret = self.unlock(owner, target, 0, OFFSET_MAX + 1);
+        let ret = self.unlock(owner, target, 0, 0);
         // only possible error on unlock is passing an invalid range
         assert!(ret.is_ok());
     }
@@ -228,7 +228,7 @@ impl LockSet {
                 continue;
             } else if start > curr.start && end < curr.end {
                 // Unlock range is strictly inside the lock.
-                let right = Lock::new(curr.kind, curr.owner, end, curr.end);
+                let right = Lock::new(curr.kind, curr.owner, end + 1, curr.end);
                 curr.end = start - 1;
                 cursor.insert_after(right);
                 return Ok(());
@@ -296,7 +296,7 @@ impl Lock {
 
     #[inline]
     pub fn overlaps_with(&self, other: &Lock) -> bool {
-        self.start < other.end && self.end > other.start
+        self.start <= other.end && self.end >= other.start
     }
 
     #[inline]
@@ -341,74 +341,90 @@ impl LockKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PID1: LockOwner = LockOwner::Process { pid: 1 };
+    const PID2: LockOwner = LockOwner::Process { pid: 2 };
+    const FD1: LockOwner = LockOwner::Resource { fd: 1 };
+
     #[test]
     fn mixed_owners() {
         let mut set = LockSet::new();
-        assert!(
-            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 2)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Exclusive, PID1, 0, 2).is_ok());
         // According to POSIX Issue 8, an **exclusive** process or OFD-owned
         // lock prevents any **other** process or OFD-owned lock from being
         // placed on any overlapping byte range.
-        assert!(
-            !set.lock(LockKind::Shared, LockOwner::Resource { fd: 1 }, 0, 2)
-                .is_ok()
-        );
-        assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Resource { fd: 1 }, 0, 2)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Shared, FD1, 0, 2).is_err());
+        assert!(set.lock(LockKind::Exclusive, FD1, 0, 2).is_err());
 
-        assert!(
-            !set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 0, 2)
-                .is_ok()
-        );
-        assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 0, 2)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Shared, PID2, 0, 2).is_err());
+        assert!(set.lock(LockKind::Exclusive, PID2, 0, 2).is_err());
         // Similarly, a **shared** process or OFD-owned lock prevents any
         // **other exclusive** process or OFD-owned lock from being placed on
         // any overlapping byte range.
-        assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 2, 2)
-                .is_ok()
-        );
-        assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Process { pid: 2 }, 2, 2)
-                .is_ok()
-        );
-        assert!(
-            !set.lock(LockKind::Exclusive, LockOwner::Resource { fd: 1 }, 2, 2)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Shared, PID1, 2, 2).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 2, 2).is_err());
+        assert!(set.lock(LockKind::Exclusive, FD1, 2, 2).is_err());
         // A **shared** process or OFD-owned lock does **not** prevent any
         // **other shared** process or OFD-owned lock from being placed on any
         // overlapping byte range.
-        assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 2 }, 2, 2)
-                .is_ok()
-        );
-        assert!(
-            set.lock(LockKind::Shared, LockOwner::Resource { fd: 1 }, 2, 2)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Shared, PID2, 2, 2).is_ok());
+        assert!(set.lock(LockKind::Shared, FD1, 2, 2).is_ok());
     }
 
     #[test]
     fn same_owner() {
         let mut set = LockSet::new();
-        assert!(
-            set.lock(LockKind::Exclusive, LockOwner::Process { pid: 1 }, 0, 8)
-                .is_ok()
-        );
+        assert!(set.lock(LockKind::Exclusive, PID1, 0, 8).is_ok());
         // Requests from the **same** owner as the existing lock are allowed.
-        assert!(
-            set.lock(LockKind::Shared, LockOwner::Process { pid: 1 }, 4, 4)
-                .is_ok()
-        );
-        assert!(set.unlock(LockOwner::Process { pid: 1 }, 4, 8).is_ok());
-        assert!(set.unlock(LockOwner::Process { pid: 1 }, 0, 8).is_ok());
+        assert!(set.lock(LockKind::Shared, PID1, 4, 4).is_ok());
+        assert!(set.unlock(PID1, 4, 8).is_ok());
+        assert!(set.unlock(PID1, 0, 8).is_ok());
+    }
+
+    #[test]
+    fn test_single_byte_exclusive() {
+        let mut set = LockSet::new();
+
+        assert!(set.lock(LockKind::Exclusive, PID1, 100, 1).is_ok());
+        assert!(set.lock(LockKind::Shared, PID2, 100, 1).is_err());
+        assert!(set.lock(LockKind::Exclusive, PID2, 100, 1).is_err());
+        assert!(set.lock(LockKind::Exclusive, PID2, 99, 1).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 101, 1).is_ok());
+    }
+
+    #[test]
+    fn test_range_byte_exclusive() {
+        let mut set = LockSet::new();
+
+        assert!(set.lock(LockKind::Exclusive, PID1, 10, 10).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 0, 10).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 20, 10).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 9, 2).is_err());
+        assert!(set.lock(LockKind::Exclusive, PID2, 19, 2).is_err());
+    }
+
+    #[test]
+    fn test_unlock_middle() {
+        let mut set = LockSet::new();
+
+        assert!(set.lock(LockKind::Exclusive, PID1, 0, 100).is_ok());
+        assert!(set.unlock(PID1, 40, 20).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 40, 20).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 39, 1).is_err());
+        assert!(set.lock(LockKind::Exclusive, PID2, 60, 1).is_err());
+    }
+
+    #[test]
+    fn test_unlock_edge() {
+        let mut set = LockSet::new();
+
+        assert!(set.lock(LockKind::Exclusive, PID1, 0, 100).is_ok());
+        assert!(set.unlock(PID1, 0, 20).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 19, 1).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 20, 1).is_err());
+
+        assert!(set.unlock(PID1, 90, 10).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 90, 1).is_ok());
+        assert!(set.lock(LockKind::Exclusive, PID2, 89, 1).is_err());
     }
 }
