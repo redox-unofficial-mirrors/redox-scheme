@@ -1,0 +1,12 @@
+
+workflow:
+  rules:
+    - if: '$CI_PROJECT_NAMESPACE == "redox-os"'
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master"'
+
+fmt:
+    script:
+        - redoxer env cargo fmt -- --check
+test:
+    script:
+        - cargo test
