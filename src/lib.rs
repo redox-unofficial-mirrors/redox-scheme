@@ -293,6 +293,41 @@ impl Socket {
         }
         Ok(())
     }
+    pub fn write_response_and_await_next_request(
+        &self,
+        behavior: SignalBehavior,
+        response: Response,
+    ) -> Result<(bool, Option<Request>)> {
+        union SqeOrCqe {
+            sqe: Sqe,
+            cqe: Cqe,
+        }
+        unsafe {
+            let mut either: SqeOrCqe = core::mem::zeroed();
+            (&raw mut either.cqe).write(response.0);
+            let buf = core::slice::from_raw_parts_mut(
+                (&raw mut either).cast::<u8>(),
+                size_of::<SqeOrCqe>(),
+            );
+            Ok(
+                match simultaneous_write_responses_read_requests(
+                    self.inner.raw(),
+                    buf,
+                    1,
+                    1,
+                    behavior,
+                )? {
+                    // EOF during write
+                    0 => (false, None),
+                    // EOF during read
+                    1 => (true, None),
+                    // both wrote and read
+                    2 => (true, Some(Request { sqe: either.sqe })),
+                    _ => unreachable!(),
+                },
+            )
+        }
+    }
     pub fn next_request(&self, behavior: SignalBehavior) -> Result<Option<Request>> {
         let mut buf = MaybeUninit::uninit();
         Ok(
@@ -312,6 +347,8 @@ impl Socket {
         let (slice, _) = buf.as_slices();
 
         // NOTE: error only allowed to occur if nothing was written
+        // TODO: Is this sound if it returns an error? What guarantees can the kernel give about
+        // when requests will be unmapped etc?
         let n = unsafe { write_responses(self.inner.raw(), slice, behavior)? };
         assert!(buf.len() >= n);
 
@@ -327,9 +364,12 @@ impl Socket {
         Ok(())
     }
     pub fn write_response(&self, resp: Response, behavior: SignalBehavior) -> Result<bool> {
+        let cqe = resp.0;
+        // TODO: Is this sound if it returns an error? What guarantees can the kernel give about
+        // when requests will be unmapped etc?
         let success = unsafe { write_responses(self.inner.raw(), &[resp], behavior)? } > 0;
-        if success && resp.0.flags == CqeOpcode::RespondWithFd as u8 {
-            let fd = resp.0.result as usize;
+        if success && cqe.flags == CqeOpcode::RespondWithFd as u8 {
+            let fd = cqe.result as usize;
             let _ = libredox::call::close(fd);
         }
         Ok(success)
@@ -363,8 +403,10 @@ impl Socket {
     }
 }
 
+// It would be unsound if this were to implement `Clone` and/or `Copy`, as that would allow reusing
+// kernel tags and hence double-free memory.
 #[repr(transparent)]
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 pub struct Response(Cqe);
 
 impl Response {
@@ -448,9 +490,43 @@ impl Response {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SignalBehavior {
     Interrupt,
     Restart,
+}
+
+/// Simultaneously writes scheme responses and then reads new scheme requests.
+///
+/// # Safety
+/// - `buf`, viewed as a `num_write`-sized array of `Response`s, must all be valid (same as when
+/// `write_responses` is used)
+#[inline]
+pub unsafe fn simultaneous_write_responses_read_requests(
+    socket: usize,
+    buf: &mut [u8],
+    num_read: usize,
+    num_write: usize,
+    behavior: SignalBehavior,
+) -> Result<usize> {
+    assert!(num_write * size_of::<Cqe>() <= buf.len());
+    assert!(num_read * size_of::<Sqe>() <= buf.len());
+
+    loop {
+        match (
+            libredox::call::call_rw(
+                socket,
+                buf,
+                CallFlags::empty(),
+                &[0, num_write as u64, num_read as u64],
+            ),
+            behavior,
+        ) {
+            (Ok(r), _) => return Ok(r),
+            (Err(error), SignalBehavior::Restart) if error.errno() == EINTR => continue,
+            (Err(error), _) => return Err(error.into()),
+        }
+    }
 }
 
 /// Read requests into a possibly uninitialized buffer.
