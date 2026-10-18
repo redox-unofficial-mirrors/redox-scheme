@@ -171,6 +171,41 @@ impl OpWrite {
     }
 }
 
+#[derive(Debug)]
+pub struct OpFrenameat {
+    req: Tag,
+    pub old_dir: usize,
+    old_path: *const str, // &req
+    pub new_dir: usize,
+    new_path: *const str, // &req
+    pub flags: u32,
+}
+impl OpFrenameat {
+    pub fn old_path(&self) -> &str {
+        // SAFETY: borrowed from self.req
+        unsafe { &*self.old_path }
+    }
+    pub fn new_path(&self) -> &str {
+        // SAFETY: Borrows &self.req
+        unsafe { &*self.new_path }
+    }
+}
+
+#[derive(Debug)]
+pub struct OpFlinkat {
+    req: Tag,
+    pub target_id: usize,
+    pub dir_id: usize,
+    path: *const str, // &req
+    pub flags: u32,
+}
+impl OpFlinkat {
+    pub fn path(&self) -> &str {
+        // SAFETY: borrowed from self.req
+        unsafe { &*self.path }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Op {
@@ -242,6 +277,13 @@ pub enum Op {
     Getdents(OpGetdents),
 
     Recvfd(RecvFdRequest),
+
+    Frenameat(OpFrenameat),
+    Flinkat(OpFlinkat),
+    ParseError {
+        req: Tag,
+        errno: i32,
+    },
 }
 
 impl Op {
@@ -394,22 +436,72 @@ impl Op {
                 }
             }
             Opcode::StdFsCall => {
-                if sqe.sqe_flags.contains(SqeFlags::MULTIPLE_IDS) {
-                    Op::StdFsCall(OpCall {
+                let multiple_ids = sqe.sqe_flags.contains(SqeFlags::MULTIPLE_IDS);
+                let kind = StdFsCallKind::try_from_raw(d as u8);
+                match kind {
+                    Some(StdFsCallKind::Frenameat) if multiple_ids => {
+                        let payload = unsafe { slice::from_raw_parts(b as *const u8, c) };
+                        let Some(nul) = payload.iter().position(|&byte| byte == b'\0') else {
+                            return Some(Op::ParseError { req, errno: EINVAL });
+                        };
+                        let (Ok(old_path), Ok(new_path)) = (
+                            str::from_utf8(&payload[..nul]),
+                            str::from_utf8(&payload[nul + 1..]),
+                        ) else {
+                            return Some(Op::ParseError { req, errno: EINVAL });
+                        };
+                        Op::Frenameat(OpFrenameat {
+                            req,
+                            old_dir: a,
+                            old_path,
+                            new_dir: f,
+                            new_path,
+                            flags: e as u32,
+                        })
+                    }
+                    Some(StdFsCallKind::Flinkat) if multiple_ids => {
+                        let payload = unsafe { slice::from_raw_parts(b as *const u8, c) };
+                        let Ok(path) = str::from_utf8(payload) else {
+                            return Some(Op::ParseError { req, errno: EINVAL });
+                        };
+                        Op::Flinkat(OpFlinkat {
+                            req,
+                            target_id: a,
+                            dir_id: f,
+                            path,
+                            flags: e as u32,
+                        })
+                    }
+                    Some(StdFsCallKind::Unlinkat) if !multiple_ids => {
+                        let payload = unsafe { slice::from_raw_parts(b as *const u8, c) };
+                        let Ok(path) = str::from_utf8(payload) else {
+                            return Some(Op::ParseError { req, errno: EINVAL });
+                        };
+                        Op::UnlinkAt(OpFdPathLike {
+                            fd: a,
+                            fcntl_flags: 0,
+                            inner: OpPathLike {
+                                req,
+                                path,
+                                flags: e,
+                            },
+                        })
+                    }
+                    Some(
+                        StdFsCallKind::Frenameat | StdFsCallKind::Flinkat | StdFsCallKind::Unlinkat,
+                    ) => Op::ParseError { req, errno: EINVAL },
+                    // TODO: Decode the remaining stdfscall into their corresponding Op variants.
+                    _ => Op::StdFsCall(OpCall {
                         req,
-                        fds: [a, f],
-                        num_fds: 2,
+                        fds: [a, if multiple_ids { f } else { 0 }],
+                        num_fds: if multiple_ids { 2 } else { 1 },
                         payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
-                        metadata: [sqe.args[3], sqe.args[4], 0],
-                    })
-                } else {
-                    Op::StdFsCall(OpCall {
-                        req,
-                        fds: [a, 0],
-                        num_fds: 1,
-                        payload: unsafe { slice::from_raw_parts_mut(b as *mut u8, c) },
-                        metadata: [sqe.args[3], sqe.args[4], sqe.args[5]],
-                    })
+                        metadata: [
+                            sqe.args[3],
+                            sqe.args[4],
+                            if multiple_ids { 0 } else { sqe.args[5] },
+                        ],
+                    }),
                 }
             }
             Opcode::Getdents => Op::Getdents(OpGetdents {
@@ -473,6 +565,9 @@ impl Op {
             Op::StdFsCall(op) => op.fd(),
             Op::Getdents(op) => op.fd,
             Op::Recvfd(req) => req.id(),
+            Op::Frenameat(op) => op.old_dir,
+            Op::Flinkat(op) => op.target_id,
+            Op::ParseError { .. } => return None,
         })
     }
 }
@@ -688,6 +783,20 @@ impl Op {
                 let res = s.on_recvfd(req);
                 return SchemeResponse::Opened(res);
             }
+            Op::Frenameat(ref req) => s
+                .frenameat(
+                    req.old_dir,
+                    req.old_path(),
+                    req.new_dir,
+                    req.new_path(),
+                    req.flags,
+                    caller,
+                )
+                .into(),
+            Op::Flinkat(ref req) => s
+                .flinkat(req.target_id, req.dir_id, req.path(), req.flags, caller)
+                .into(),
+            Op::ParseError { errno, .. } => Err(Error::new(errno)).into(),
         }
     }
     // XXX: Although this has not yet been benchmarked, it likely makes sense for the
@@ -852,6 +961,24 @@ impl Op {
                 let res = s.on_recvfd(&req).await;
                 return Response::open_dup_like(res, req);
             }
+            Op::Frenameat(req) => (
+                s.frenameat(
+                    req.old_dir,
+                    req.old_path(),
+                    req.new_dir,
+                    req.new_path(),
+                    req.flags,
+                    &caller,
+                )
+                .await,
+                req.into_tag(),
+            ),
+            Op::Flinkat(req) => (
+                s.flinkat(req.target_id, req.dir_id, req.path(), req.flags, &caller)
+                    .await,
+                req.into_tag(),
+            ),
+            Op::ParseError { req, errno } => (Err(Error::new(errno)), req),
         };
         Response::new(res, tag)
     }
@@ -951,11 +1078,34 @@ pub trait SchemeAsync {
         Err(Error::new(EOPNOTSUPP))
     }
 
+    async fn flinkat(
+        &mut self,
+        id: usize,
+        dirid: usize,
+        path: &str,
+        flags: u32,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     async fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
     async fn frename(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    async fn frenameat(
+        &mut self,
+        old_dir: usize,
+        old_path: &str,
+        new_dir: usize,
+        new_path: &str,
+        flags: u32,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -1123,9 +1273,6 @@ pub trait SchemeAsync {
                         };
                         self.futimens(id, times, ctx).await.map(|_| 0)
                     }
-                    /* TODO: Support Unlinkat using std_fs_call
-                    Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
-                    */
                     _ => Err(Error::new(EOPNOTSUPP)),
                 }
             }
@@ -1208,11 +1355,34 @@ pub trait SchemeSync {
         Err(Error::new(EOPNOTSUPP))
     }
 
+    fn flinkat(
+        &mut self,
+        id: usize,
+        dirid: usize,
+        path: &str,
+        flags: u32,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     fn fpath(&mut self, id: usize, buf: &mut [u8], ctx: &CallerCtx) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
     fn frename(&mut self, id: usize, path: &str, ctx: &CallerCtx) -> Result<usize> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn frenameat(
+        &mut self,
+        old_dir: usize,
+        old_path: &str,
+        new_dir: usize,
+        new_path: &str,
+        flags: u32,
+        ctx: &CallerCtx,
+    ) -> Result<usize> {
         Err(Error::new(EOPNOTSUPP))
     }
 
@@ -1329,10 +1499,10 @@ pub trait SchemeSync {
         use syscall::flag::StdFsCallKind::*;
         match kind {
             Relpathat => {
-                if ids.len() != 2 {
+                let (Some(target_id), Some(dir_id)) = (ids.first(), ids.get(1)) else {
                     return Err(Error::new(EINVAL));
-                }
-                self.relpathat(ids[0], ids[1], payload, ctx)
+                };
+                self.relpathat(*target_id, *dir_id, payload, ctx)
             }
             _ => {
                 if ids.len() != 1 {
@@ -1382,9 +1552,6 @@ pub trait SchemeSync {
                         };
                         self.futimens(id, times, ctx).map(|_| 0)
                     }
-                    /* TODO: Support Unlinkat using std_fs_call
-                    Unlinkat => self.std_fs_call(fd, kind, payload, metadata, &caller).map(|_| 0)
-                    */
                     _ => Err(Error::new(EOPNOTSUPP)),
                 }
             }
@@ -1472,7 +1639,7 @@ macro_rules! trivial_into {
         )*
     }
 }
-trivial_into![OpCall, OpRead, OpWrite, OpGetdents,];
+trivial_into![OpCall, OpRead, OpWrite, OpGetdents, OpFrenameat, OpFlinkat,];
 
 macro_rules! trivial_unsafe_impl_send_sync {
     ($($t:ident),* $(,)?) => {
@@ -1485,7 +1652,7 @@ macro_rules! trivial_unsafe_impl_send_sync {
 // # Safety
 //
 // Op instances are only valid while processing syscall requests.
-trivial_unsafe_impl_send_sync![OpCall, OpRead, OpWrite, OpGetdents,];
+trivial_unsafe_impl_send_sync![OpCall, OpRead, OpWrite, OpGetdents, OpFrenameat, OpFlinkat,];
 unsafe impl<T: ?Sized> Send for OpQueryWrite<T> {}
 unsafe impl<T: ?Sized> Sync for OpQueryWrite<T> {}
 
@@ -1547,7 +1714,8 @@ impl IntoTag for Op {
             | Fsync { req, .. }
             | Ftruncate { req, .. }
             | MmapPrep { req, .. }
-            | Munmap { req, .. } => req,
+            | Munmap { req, .. }
+            | ParseError { req, .. } => req,
             Flink(op) => op.into_tag(),
             Fpath(op) => op.into_tag(),
             Frename(op) => op.into_tag(),
@@ -1558,6 +1726,8 @@ impl IntoTag for Op {
             StdFsCall(op) => op.into_tag(),
             Getdents(op) => op.into_tag(),
             Recvfd(req) => req.into_tag(),
+            Frenameat(op) => op.into_tag(),
+            Flinkat(op) => op.into_tag(),
         }
     }
     fn req_id(&self) -> Id {
@@ -1576,7 +1746,8 @@ impl IntoTag for Op {
             | Fsync { req, .. }
             | Ftruncate { req, .. }
             | MmapPrep { req, .. }
-            | Munmap { req, .. } => req.req_id(),
+            | Munmap { req, .. }
+            | ParseError { req, .. } => req.req_id(),
             Flink(op) => op.req_id(),
             Fpath(op) => op.req_id(),
             Frename(op) => op.req_id(),
@@ -1587,6 +1758,8 @@ impl IntoTag for Op {
             StdFsCall(op) => op.req_id(),
             Getdents(op) => op.req_id(),
             Recvfd(req) => req.req_id(),
+            Frenameat(op) => op.req_id(),
+            Flinkat(op) => op.req_id(),
         }
     }
 }

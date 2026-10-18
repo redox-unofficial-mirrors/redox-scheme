@@ -265,7 +265,7 @@ impl Socket {
         }
 
         let fd = libredox::call::dup(cap_fd, b"create-scheme")?;
-        libredox::call::fcntl(fd, syscall::F_SETFD, flag::O_CLOEXEC as usize)?;
+        libredox::call::fcntl(fd, flag::F_SETFD as usize, flag::O_CLOEXEC as usize)?;
 
         libredox::call::fcntl(fd, syscall::F_SETFL, flags as usize)?;
         Ok(Self {
