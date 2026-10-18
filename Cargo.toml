@@ -1,7 +1,8 @@
 [package]
 name = "redox-scheme"
 authors = ["4lDO2 <4lDO2@protonmail.com>"]
-version = "0.11.5"
+# Always bump the version in a separate commit, which only changes the version.
+version = "0.12.0"
 edition = "2024"
 license = "MIT"
 exclude = ["target"]
